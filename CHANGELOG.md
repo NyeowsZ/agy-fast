@@ -5,6 +5,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **Overhauled routing rules (`rules/AGENTS.md`) for leaner token footprint & clearer tool selection**
+  - Fixed two routing catch-22s: replaced unactionable `>300` vs `<300` line-count branching and the `<300` vs `<=200`-line `read_file` conflict with observable triggers (`>=2` unknown files → `quick_outline` + parallel ranged `read_file`; 1 suspected-small file → `read_file(1-300)` instead of 2-turn `1-150` + `151-234` chunking), and switched `batch_search(type: "def")` to always pass `includeBody: true` paired with `type: "refs"` in the same call.
+  - Restructured dense multi-topic rules into workflow phases (`Locate` → `Read` → `Edit & Verify` → `Host & Session Hygiene`), clarified single-op boundaries (`edit_file` for 1 small hunk without `verify`), and removed duplicate inline `Quick Schemas` now that all 5 tools load eagerly via `mcp_config.json` (~36% smaller always-on prompt footprint: 5.66 KB → 3.60 KB).
+
+---
+
 ## [0.4.0] - 2026-11-23
 
 ### Added
