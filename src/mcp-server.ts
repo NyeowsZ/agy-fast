@@ -310,7 +310,7 @@ export function createAgyFastServer(
     {
       name: "batch_search",
       description:
-        "Run multiple read-only text/regex searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output.",
+        "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output.",
       inputSchema: {
         type: "object",
         properties: {
@@ -328,12 +328,12 @@ export function createAgyFastServer(
               properties: {
                 type: {
                   type: "string",
-                  enum: ["text", "regex", "glob", "fuzzy", "git"],
+                  enum: ["text", "regex", "glob", "fuzzy", "git", "def", "refs"],
                 },
                 pattern: {
                   type: "string",
                   description:
-                    "Literal text, regex, fuzzy path query, glob pattern (use * and {a,b}, not regex |), or read-only git subcommand (e.g. 'status --short', 'log -n 5 --oneline').",
+                    "Literal text, regex, symbol name (def/refs), fuzzy path query, glob pattern (use * and {a,b}, not regex |), or read-only git subcommand (e.g. 'status --short', 'log -n 5 --oneline').",
                 },
                 path: {
                   type: "string",

@@ -952,4 +952,143 @@ describe("batch_search", () => {
       await fs.rm(edgeDir, { recursive: true, force: true });
     }
   });
+
+  it("supports type: 'def' and type: 'refs' with spans, caller tags, imports preserved, test-file ranking, and Node fallback", async () => {
+    const symDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-def-refs-"));
+    try {
+      await fs.mkdir(path.join(symDir, "src", "auth"), { recursive: true });
+      await fs.mkdir(path.join(symDir, "src", "pages"), { recursive: true });
+      await fs.mkdir(path.join(symDir, "test"), { recursive: true });
+
+      await fs.writeFile(
+        path.join(symDir, "src", "auth", "service.ts"),
+        [
+          "export class AuthService {",
+          "  async login(email: string): Promise<boolean> {",
+          "    const ok = Boolean(email);",
+          "    return ok;",
+          "  }",
+          "}",
+          "",
+          "export function publishOrderSignal(orderId: string): string {",
+          "  return `order:${orderId}`;",
+          "}",
+        ].join("\n") + "\n",
+        "utf8",
+      );
+
+      await fs.writeFile(
+        path.join(symDir, "src", "pages", "checkout.ts"),
+        [
+          "import { AuthService, publishOrderSignal } from '../auth/service';",
+          "",
+          "// login comment should be ignored by refs",
+          "export async function handleCheckout(svc: AuthService, id: string) {",
+          "  const ok = await svc.login('a@b.com');",
+          "  if (ok) {",
+          "    publishOrderSignal(id);",
+          "    publishOrderSignal(`${id}-retry`);",
+          "  }",
+          "  return ok;",
+          "}",
+        ].join("\n") + "\n",
+        "utf8",
+      );
+
+      await fs.writeFile(
+        path.join(symDir, "test", "auth.test.ts"),
+        [
+          "function login() {",
+          "  return true;",
+          "}",
+          "login();",
+        ].join("\n") + "\n",
+        "utf8",
+      );
+
+      // Test both rg (if available) and pure-Node fallback
+      for (const forceNodeFallback of [false, true]) {
+        const combined = await runBatchSearch(
+          {
+            cwd: symDir,
+            queries: [
+              { type: "def", pattern: "login" },
+              { type: "def", pattern: "AuthService.login" },
+              { type: "refs", pattern: "publishOrderSignal" },
+              { type: "refs", pattern: "login" },
+              { type: "def", pattern: "login", outputMode: "files_with_matches" },
+              { type: "refs", pattern: "publishOrderSignal", outputMode: "count" },
+            ],
+          },
+          { forceNodeFallback },
+        );
+        assert.equal(combined.isError, false);
+        const sections = combined.text.split("\n\n");
+
+        // 1. Bare def: returns exact spans, skips call sites, ranks src/ ahead of test/
+        assert.match(sections[0]!, /src\/auth\/service\.ts\n  L2-L5 \[method\] AuthService\.login/);
+        assert.doesNotMatch(sections[0]!, /checkout\.ts/);
+        assert.ok(
+          sections[0]!.indexOf("src/auth/service.ts") < sections[0]!.indexOf("test/auth.test.ts"),
+          "Non-test source definition must rank ahead of test helper definition",
+        );
+
+        // 2. Qualified def: matches only AuthService.login, not test helper login()
+        assert.match(sections[1]!, /L2-L5 \[method\] AuthService\.login/);
+        assert.doesNotMatch(sections[1]!, /auth\.test\.ts/);
+
+        // 3. Refs: keeps import line, excludes definition line, deduplicates consecutive caller tags
+        assert.match(sections[2]!, /1: import \{ AuthService, publishOrderSignal \}/);
+        assert.match(sections[2]!, /7: .*publishOrderSignal\(id\);  \[in handleCheckout L4-L11\]/);
+        assert.match(sections[2]!, /8: .*publishOrderSignal\(`\$\{id\}-retry`\);$/m);
+        assert.doesNotMatch(sections[2]!, /export function publishOrderSignal/);
+
+        // 4. Refs for login: skips pure comment line and definition line, keeps call site with caller tag
+        assert.doesNotMatch(sections[3]!, /comment should be ignored/);
+        assert.doesNotMatch(sections[3]!, /async login\(email/);
+        assert.match(sections[3]!, /5: .*svc\.login\('a@b\.com'\);  \[in handleCheckout L4-L11\]/);
+
+        // 5. outputMode: files_with_matches for def
+        assert.match(sections[4]!, /src\/auth\/service\.ts/);
+
+        // 6. outputMode: count for refs (excludes definition-only service.ts)
+        assert.match(sections[5]!, /src\/pages\/checkout\.ts: 3 refs/);
+        assert.doesNotMatch(sections[5]!, /src\/auth\/service\.ts/);
+      }
+
+      // 7. Verify >15 files cap in refs still emits raw matches for remaining files + notice, and def beats text on bytes
+      for (let i = 0; i < 18; i++) {
+        await fs.writeFile(
+          path.join(symDir, "src", "pages", `caller-${String(i).padStart(2, "0")}.ts`),
+          `import { publishOrderSignal } from '../auth/service';\nexport function run${i}() { return publishOrderSignal('${i}'); }\n`,
+          "utf8",
+        );
+      }
+
+      const [refsCapped, defVsText] = await Promise.all([
+        runBatchSearch({
+          cwd: symDir,
+          queries: [{ type: "refs", pattern: "publishOrderSignal", maxResults: 80 }],
+        }),
+        runBatchSearch({
+          cwd: symDir,
+          queries: [
+            { type: "def", pattern: "publishOrderSignal" },
+            { type: "text", pattern: "publishOrderSignal" },
+          ],
+        }),
+      ]);
+      assert.equal(refsCapped.isError, false);
+      assert.match(refsCapped.text, /caller-17\.ts/);
+      assert.match(refsCapped.text, /caller\/def analysis capped at 15 files/);
+
+      const [defSec, textSec] = defVsText.text.split("\n\n");
+      assert.ok(
+        defSec!.length * 3 < textSec!.length,
+        `Expected def output (${defSec!.length} chars) to be much smaller than text output (${textSec!.length} chars)`,
+      );
+    } finally {
+      await fs.rm(symDir, { recursive: true, force: true });
+    }
+  });
 });
