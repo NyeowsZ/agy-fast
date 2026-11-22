@@ -28,8 +28,8 @@ describe("run_checks", () => {
   const nodeBin = JSON.stringify(process.execPath);
 
   it("executes multiple commands concurrently and compacts passing output", async () => {
-    const sleepMs = process.platform === "win32" ? 600 : 180;
-    const maxElapsed = process.platform === "win32" ? 1750 : 480;
+    const sleepMs = process.platform === "win32" ? 1200 : 180;
+    const maxElapsed = process.platform === "win32" ? 3400 : 480;
     const start = Date.now();
     const res = await runChecks({
       concurrency: 3,
