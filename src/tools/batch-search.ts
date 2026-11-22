@@ -20,8 +20,9 @@ import {
   fitSectionsToByteBudget,
   sliceSafeChars,
 } from "../utils/output-filter.js";
+import { extractSymbols, type SymbolEntry } from "./read-slices.js";
 
-export type SearchQueryType = "text" | "regex" | "glob" | "fuzzy" | "git";
+export type SearchQueryType = "text" | "regex" | "glob" | "fuzzy" | "git" | "def" | "refs";
 
 export interface SearchQuery {
   type: SearchQueryType;
@@ -1403,11 +1404,459 @@ function formatFileMatches(
   return `${blocks.join("\n")}${footer}`;
 }
 
+const MAX_SYMBOL_FILE_BYTES = 250 * 1024;
+const MAX_REFS_ENRICH_FILES = 15;
+const MAX_DEF_CANDIDATE_FILES = 60;
+
+type SymbolCache = Map<string, Promise<SymbolEntry[] | null>>;
+
+function escapeRegExpLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isTestLikePath(relFile: string): boolean {
+  const norm = relFile.replace(/\\/g, "/").toLowerCase();
+  return (
+    /(?:^|\/)(?:__tests__|__mocks__|tests?|specs?|fixtures?)\//.test(norm) ||
+    /\.(?:test|spec|e2e|stories)\.[^/]+$/.test(norm)
+  );
+}
+
+function isPureCommentLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return true;
+  if (
+    trimmed.startsWith("//") ||
+    trimmed.startsWith("/*") ||
+    trimmed.startsWith("*/") ||
+    trimmed.startsWith("*") ||
+    trimmed.startsWith("<!--")
+  ) {
+    return true;
+  }
+  // Treat `#` as comment unless it looks like a preprocessor directive (`#include`, `#define`, `#if`) or Rust attr (`#[`)
+  if (
+    trimmed.startsWith("#") &&
+    !/^#(?:\[|include\b|define\b|if\b|ifdef\b|ifndef\b|else\b|elif\b|endif\b|pragma\b|region\b|endregion\b)/.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function getCachedFileSymbols(
+  absPath: string,
+  symbolCache: SymbolCache,
+): Promise<SymbolEntry[] | null> {
+  let cached = symbolCache.get(absPath);
+  if (!cached) {
+    cached = (async (): Promise<SymbolEntry[] | null> => {
+      try {
+        const st = await fs.stat(absPath);
+        if (!st.isFile() || st.size > MAX_SYMBOL_FILE_BYTES) {
+          return null;
+        }
+        const raw = await fs.readFile(absPath);
+        if (isLikelyBinary(raw)) {
+          return null;
+        }
+        return extractSymbols(absPath, raw.toString("utf8"));
+      } catch {
+        return null;
+      }
+    })();
+    symbolCache.set(absPath, cached);
+  }
+  return cached;
+}
+
+function buildQualifiedSymbolName(sym: SymbolEntry, allSymbols: SymbolEntry[]): string {
+  if (sym.depth <= 0) return sym.name;
+  let parent: SymbolEntry | null = null;
+  for (const candidate of allSymbols) {
+    if (
+      candidate.depth < sym.depth &&
+      candidate.startLine <= sym.startLine &&
+      candidate.endLine >= sym.endLine
+    ) {
+      if (
+        !parent ||
+        candidate.depth > parent.depth ||
+        candidate.endLine - candidate.startLine < parent.endLine - parent.startLine
+      ) {
+        parent = candidate;
+      }
+    }
+  }
+  return parent ? `${parent.name}.${sym.name}` : sym.name;
+}
+
+function matchesSymbolPattern(
+  sym: SymbolEntry,
+  qualifiedName: string,
+  pattern: string,
+  caseSensitive: boolean,
+): boolean {
+  const norm = (s: string) => (caseSensitive ? s : s.toLowerCase());
+  const pat = norm(pattern.trim());
+  const bare = norm(sym.name.trim());
+  const qual = norm(qualifiedName.trim());
+
+  if (bare === pat || qual === pat) return true;
+  if (pat.includes(".") || pat.includes("::")) {
+    const normalizedPat = pat.replace(/::/g, ".");
+    const normalizedQual = qual.replace(/::/g, ".");
+    return normalizedQual === normalizedPat || normalizedQual.endsWith(`.${normalizedPat}`);
+  }
+  // Bare pattern: match leaf of dotted/scoped symbol names like `AuthService.login` or `ns::login`
+  return bare.endsWith(`.${pat}`) || bare.endsWith(`::${pat}`) || qual.endsWith(`.${pat}`);
+}
+
+function extractLeafSymbolName(pattern: string): string {
+  const trimmed = pattern.trim();
+  const parts = trimmed.split(/\.|::/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1]! : trimmed;
+}
+
+function findEnclosingSymbol(
+  lineNumber: number,
+  symbols: SymbolEntry[],
+): { sym: SymbolEntry; qualifiedName: string } | null {
+  let best: SymbolEntry | null = null;
+  for (const sym of symbols) {
+    if (sym.startLine <= lineNumber && lineNumber <= sym.endLine) {
+      if (
+        !best ||
+        sym.depth > best.depth ||
+        (sym.depth === best.depth && sym.endLine - sym.startLine < best.endLine - best.startLine)
+      ) {
+        best = sym;
+      }
+    }
+  }
+  if (!best) return null;
+  return { sym: best, qualifiedName: buildQualifiedSymbolName(best, symbols) };
+}
+
+async function runTextOrRegexInternal(
+  query: SearchQuery,
+  searchRoot: string,
+  baseCwd: string,
+  useRg: boolean,
+): Promise<{ files: FileMatches[]; totalMatches: number; truncated: boolean }> {
+  if (useRg) {
+    try {
+      return await runTextOrRegexWithRg(query, searchRoot, baseCwd);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("rg spawn error:")) {
+        return await runTextOrRegexWithNode(query, searchRoot, baseCwd);
+      }
+      throw err;
+    }
+  }
+  return await runTextOrRegexWithNode(query, searchRoot, baseCwd);
+}
+
+async function runDefQuery(
+  query: SearchQuery,
+  searchRoot: string,
+  baseCwd: string,
+  useRg: boolean,
+  symbolCache: SymbolCache,
+): Promise<string> {
+  const rawPattern = query.pattern.trim();
+  if (!rawPattern) {
+    throw new Error("Query 'pattern' must be a non-empty symbol name");
+  }
+  const caseSensitive = query.caseSensitive ?? true;
+  const maxResults = clampInt(query.maxResults ?? 40, 1, 200);
+  const leafName = extractLeafSymbolName(rawPattern);
+  const escaped = escapeRegExpLiteral(leafName);
+
+  // Pure RE2-compatible declaration-anchored candidate pattern (no lookarounds)
+  const modPrefix =
+    "(?:(?:export|default|public|private|protected|internal|static|readonly|abstract|override|virtual|async|declare|extern|pub|inline|final|suspend|get|set)\\s+)*";
+  const kwDecl = `(?:function\\*?|class|interface|type|enum|const|let|var|def|fn|func(?:\\s*\\([^)]*\\))?|struct|trait|impl|mod|module|namespace|signal|record|protocol|object)\\s+${escaped}\\b`;
+  const memberDecl = `${escaped}\\s*(?:<[^>{}]*>)?\\s*(?:\\(|=|:)`;
+  const candidatePattern = `^[\\t ]*${modPrefix}(?:${kwDecl}|${memberDecl})`;
+
+  const candidateRes = await runTextOrRegexInternal(
+    {
+      ...query,
+      type: "regex",
+      pattern: candidatePattern,
+      outputMode: "files_with_matches",
+      contextLines: 0,
+      multiline: false,
+      maxResults: MAX_DEF_CANDIDATE_FILES,
+    },
+    searchRoot,
+    baseCwd,
+    useRg,
+  );
+
+  if (candidateRes.files.length === 0) {
+    return "(no definitions found)";
+  }
+
+  // Sort non-test source files ahead of test/spec/mock files before extracting symbols
+  const sortedCandidates = [...candidateRes.files].sort((a, b) => {
+    const aTest = isTestLikePath(a.file) ? 1 : 0;
+    const bTest = isTestLikePath(b.file) ? 1 : 0;
+    if (aTest !== bTest) return aTest - bTest;
+    return a.file.localeCompare(b.file);
+  });
+
+  const matchedFiles: Array<{
+    file: string;
+    defs: Array<{ sym: SymbolEntry; qualifiedName: string }>;
+  }> = [];
+  let totalDefs = 0;
+  let truncated = false;
+
+  const symbolsList = await Promise.all(
+    sortedCandidates.map(async (fm) => {
+      const absPath = resolvePath(fm.file, baseCwd);
+      const syms = await getCachedFileSymbols(absPath, symbolCache);
+      return { file: fm.file, syms };
+    }),
+  );
+
+  for (const { file, syms } of symbolsList) {
+    if (!syms || syms.length === 0) continue;
+    const defs: Array<{ sym: SymbolEntry; qualifiedName: string }> = [];
+    for (const sym of syms) {
+      const qualifiedName = buildQualifiedSymbolName(sym, syms);
+      if (matchesSymbolPattern(sym, qualifiedName, rawPattern, caseSensitive)) {
+        defs.push({ sym, qualifiedName });
+      }
+    }
+    if (defs.length === 0) continue;
+
+    if (query.outputMode === "files_with_matches" || query.outputMode === "count") {
+      if (matchedFiles.length >= maxResults) {
+        truncated = true;
+        break;
+      }
+      matchedFiles.push({ file, defs });
+      totalDefs += defs.length;
+    } else {
+      const remaining = maxResults - totalDefs;
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+      if (defs.length > remaining) {
+        matchedFiles.push({ file, defs: defs.slice(0, remaining) });
+        totalDefs += remaining;
+        truncated = true;
+        break;
+      }
+      matchedFiles.push({ file, defs });
+      totalDefs += defs.length;
+    }
+  }
+
+  if (matchedFiles.length === 0) {
+    return "(no definitions found)";
+  }
+
+  if (query.outputMode === "files_with_matches") {
+    const body = matchedFiles.map((f) => f.file).join("\n");
+    const footer = truncated ? `\n... [truncated; showing ${matchedFiles.length} files]` : "";
+    return `${body}${footer}`;
+  }
+  if (query.outputMode === "count") {
+    const body = matchedFiles.map((f) => `${f.file}: ${f.defs.length} definitions`).join("\n");
+    const footer = truncated ? `\n... [truncated; showing ${matchedFiles.length} files]` : "";
+    return `${body}${footer}`;
+  }
+
+  const blocks = matchedFiles.map(({ file, defs }) => {
+    const lines = defs.map(({ sym, qualifiedName }) => {
+      const range = sym.endLine > sym.startLine ? `L${sym.startLine}-L${sym.endLine}` : `L${sym.startLine}`;
+      return `  ${range} [${sym.kind}] ${qualifiedName}`;
+    });
+    return `${file}\n${lines.join("\n")}`;
+  });
+  const footer = truncated ? `\n... [truncated at ${totalDefs} definitions]` : "";
+  return `${blocks.join("\n")}${footer}`;
+}
+
+async function runRefsQuery(
+  query: SearchQuery,
+  searchRoot: string,
+  baseCwd: string,
+  useRg: boolean,
+  symbolCache: SymbolCache,
+): Promise<string> {
+  const rawPattern = query.pattern.trim();
+  if (!rawPattern) {
+    throw new Error("Query 'pattern' must be a non-empty symbol name");
+  }
+  const caseSensitive = query.caseSensitive ?? true;
+  const maxResults = clampInt(query.maxResults ?? 40, 1, 200);
+
+  let refRegex: string;
+  if (rawPattern.includes(".") || rawPattern.includes("::")) {
+    const parts = rawPattern.split(/\.|::/).filter(Boolean);
+    refRegex = `\\b${parts.map(escapeRegExpLiteral).join("\\s*(?:\\.|::)\\s*")}\\b`;
+  } else {
+    refRegex = `\\b${escapeRegExpLiteral(rawPattern)}\\b`;
+  }
+
+  const rawRes = await runTextOrRegexInternal(
+    {
+      ...query,
+      type: "regex",
+      pattern: refRegex,
+      outputMode: "content",
+      contextLines: 0,
+      multiline: false,
+      maxResults: Math.min(200, Math.max(maxResults * 2, 80)),
+    },
+    searchRoot,
+    baseCwd,
+    useRg,
+  );
+
+  if (rawRes.files.length === 0) {
+    return "(no references found)";
+  }
+
+  // Enrich up to MAX_REFS_ENRICH_FILES files with symbol info; remaining files emit raw matches
+  const enrichedLimit = Math.min(rawRes.files.length, MAX_REFS_ENRICH_FILES);
+  const symbolResults = await Promise.all(
+    rawRes.files.slice(0, enrichedLimit).map(async (fm) => {
+      const absPath = resolvePath(fm.file, baseCwd);
+      return getCachedFileSymbols(absPath, symbolCache);
+    }),
+  );
+
+  let cappedEnrichment = rawRes.files.length > MAX_REFS_ENRICH_FILES;
+  const outputFiles: Array<{
+    file: string;
+    lines: Array<{ lineNumber: number; text: string; callerTag?: string }>;
+  }> = [];
+  let totalRefs = 0;
+  let truncated = rawRes.truncated;
+
+  for (let i = 0; i < rawRes.files.length; i++) {
+    const fm = rawRes.files[i]!;
+    const syms = i < enrichedLimit ? symbolResults[i]! : null;
+    if (i < enrichedLimit && syms === null) {
+      cappedEnrichment = true;
+    }
+
+    const defLines = new Set<number>();
+    if (syms) {
+      for (const sym of syms) {
+        const qualifiedName = buildQualifiedSymbolName(sym, syms);
+        if (matchesSymbolPattern(sym, qualifiedName, rawPattern, caseSensitive)) {
+          defLines.add(sym.startLine);
+        }
+      }
+    }
+
+    const keptLines: Array<{ lineNumber: number; text: string; callerTag?: string }> = [];
+    let lastCallerKey = "";
+
+    for (const line of fm.lines) {
+      if (!line.isMatch) continue;
+      if (isPureCommentLine(line.text)) continue;
+      if (defLines.has(line.lineNumber)) continue;
+
+      let callerTag: string | undefined;
+      if (syms) {
+        const enc = findEnclosingSymbol(line.lineNumber, syms);
+        if (enc) {
+          const range =
+            enc.sym.endLine > enc.sym.startLine
+              ? `L${enc.sym.startLine}-L${enc.sym.endLine}`
+              : `L${enc.sym.startLine}`;
+          const key = `${enc.qualifiedName}@${range}`;
+          if (key !== lastCallerKey) {
+            callerTag = `[in ${enc.qualifiedName} ${range}]`;
+            lastCallerKey = key;
+          }
+        } else {
+          lastCallerKey = "";
+        }
+      }
+
+      keptLines.push({ lineNumber: line.lineNumber, text: line.text, callerTag });
+    }
+
+    if (keptLines.length === 0) continue;
+
+    if (query.outputMode === "files_with_matches" || query.outputMode === "count") {
+      if (outputFiles.length >= maxResults) {
+        truncated = true;
+        break;
+      }
+      outputFiles.push({ file: fm.file, lines: keptLines });
+      totalRefs += keptLines.length;
+    } else {
+      const remaining = maxResults - totalRefs;
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+      if (keptLines.length > remaining) {
+        outputFiles.push({ file: fm.file, lines: keptLines.slice(0, remaining) });
+        totalRefs += remaining;
+        truncated = true;
+        break;
+      }
+      outputFiles.push({ file: fm.file, lines: keptLines });
+      totalRefs += keptLines.length;
+    }
+  }
+
+  if (outputFiles.length === 0) {
+    return "(no references found)";
+  }
+
+  const notes: string[] = [];
+  if (truncated) {
+    notes.push(
+      query.outputMode === "files_with_matches" || query.outputMode === "count"
+        ? `... [truncated; showing ${outputFiles.length} files]`
+        : `... [truncated at ${totalRefs} refs]`,
+    );
+  }
+  if (cappedEnrichment && query.outputMode !== "files_with_matches" && query.outputMode !== "count") {
+    notes.push(
+      `... [caller/def analysis capped at ${MAX_REFS_ENRICH_FILES} files (<=250 KB/file); remaining files shown as raw matches]`,
+    );
+  }
+  const footer = notes.length > 0 ? `\n${notes.join("\n")}` : "";
+
+  if (query.outputMode === "files_with_matches") {
+    return `${outputFiles.map((f) => f.file).join("\n")}${footer}`;
+  }
+  if (query.outputMode === "count") {
+    return `${outputFiles.map((f) => `${f.file}: ${f.lines.length} refs`).join("\n")}${footer}`;
+  }
+
+  const blocks = outputFiles.map(({ file, lines }) => {
+    const formatted = lines.map((l) => {
+      const text = l.text.length > 220 ? `${sliceSafeChars(l.text, 220)}...` : l.text;
+      return l.callerTag ? `  ${l.lineNumber}: ${text}  ${l.callerTag}` : `  ${l.lineNumber}: ${text}`;
+    });
+    return `${file}\n${formatted.join("\n")}`;
+  });
+  return `${blocks.join("\n")}${footer}`;
+}
+
 async function executeSingleQuery(
   query: SearchQuery,
   index: number,
   baseCwd: string,
   useRg: boolean,
+  symbolCache: SymbolCache,
 ): Promise<string> {
   const header = `## Query ${index + 1} [${query.type}] ${query.pattern}${query.path ? ` (in ${query.path})` : ""}`;
   try {
@@ -1447,22 +1896,18 @@ async function executeSingleQuery(
       return `${header}\n${out}`;
     }
 
+    if (query.type === "def") {
+      const out = await runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache);
+      return `${header}\n${out}`;
+    }
+
+    if (query.type === "refs") {
+      const out = await runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache);
+      return `${header}\n${out}`;
+    }
+
     if (query.type === "text" || query.type === "regex") {
-      let res;
-      if (useRg) {
-        try {
-          res = await runTextOrRegexWithRg(query, searchRoot, baseCwd);
-        } catch (err) {
-          // Only fallback on spawn error; surface regex errors directly
-          if (err instanceof Error && err.message.startsWith("rg spawn error:")) {
-            res = await runTextOrRegexWithNode(query, searchRoot, baseCwd);
-          } else {
-            throw err;
-          }
-        }
-      } else {
-        res = await runTextOrRegexWithNode(query, searchRoot, baseCwd);
-      }
+      const res = await runTextOrRegexInternal(query, searchRoot, baseCwd, useRg);
       if (query.outputMode === "count" || query.outputMode === "files_with_matches") {
         const body = res.files.map(({ file, count }) => query.outputMode === "count"
           ? `${file}: ${count} ${query.multiline ? "matches" : "matching lines"}`
@@ -1564,13 +2009,14 @@ export async function runBatchSearch(
   const maxChars = clampInt(input.maxChars ?? 8_500, 500, DEFAULT_INLINE_MAX_BYTES);
   const maxBytes = DEFAULT_INLINE_MAX_BYTES;
   const needsTextSearch = queries.some(
-    (q) => q.type === "text" || q.type === "regex",
+    (q) => q.type === "text" || q.type === "regex" || q.type === "def" || q.type === "refs",
   );
   const useRg =
     needsTextSearch && !options.forceNodeFallback && (await isRipgrepAvailable());
+  const symbolCache: SymbolCache = new Map();
 
   const sections = await Promise.all(
-    queries.map((q, idx) => executeSingleQuery(q, idx, baseCwd, useRg)),
+    queries.map((q, idx) => executeSingleQuery(q, idx, baseCwd, useRg, symbolCache)),
   );
 
   // Allocate budget fairly across queries via water-filling within maxChars & inline UTF-8 byte ceiling

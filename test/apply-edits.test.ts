@@ -260,13 +260,24 @@ describe("apply_edits", () => {
     const realFile = path.join(tmpDir, "real-target.txt");
     const symFile = path.join(tmpDir, "sym-link.txt");
     await fs.writeFile(realFile, "hello link\n", "utf8");
-    await fs.symlink(realFile, symFile);
+    let canSymlink = true;
+    try {
+      await fs.symlink(realFile, symFile);
+    } catch (err) {
+      if (process.platform === "win32" && (err as NodeJS.ErrnoException)?.code === "EPERM") {
+        canSymlink = false;
+      } else {
+        throw err;
+      }
+    }
 
     const editRes = await runApplyEdits({
       cwd: tmpDir,
       edits: [
         { path: "tool.sh", hunks: [{ target: "v1", replacement: "v2" }] },
-        { path: "sym-link.txt", hunks: [{ target: "hello", replacement: "updated" }] },
+        ...(canSymlink
+          ? [{ path: "sym-link.txt", hunks: [{ target: "hello", replacement: "updated" }] }]
+          : [{ path: "real-target.txt", hunks: [{ target: "hello", replacement: "updated" }] }]),
         { path: "real-target.txt", hunks: [{ target: "link", replacement: "target" }] },
         { path: "single-line.txt", create: "only one line\n" },
       ],
@@ -278,7 +289,9 @@ describe("apply_edits", () => {
     if (process.platform !== "win32") {
       assert.equal((await fs.stat(scriptPath)).mode & 0o777, 0o755);
     }
-    assert.equal((await fs.lstat(symFile)).isSymbolicLink(), true);
+    if (canSymlink) {
+      assert.equal((await fs.lstat(symFile)).isSymbolicLink(), true);
+    }
     assert.equal(await fs.readFile(realFile, "utf8"), "updated target\n");
 
     const badLine = await runApplyEdits({
@@ -952,5 +965,151 @@ describe("apply_edits", () => {
     assert.doesNotMatch(res.text, /dist\/shared\.js/);
     assert.match(res.text, /src\/Table\.tsx\(42,11\): error TS2322/);
     assert.match(res.text, /Found 1 error in src\/Table\.tsx:42/);
+  });
+
+  it("supports atomic delete, moveTo, moveTo+hunks, overwrite guard, binary move, case-only rename, dryRun, and rollback", async () => {
+    const opsDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-move-del-"));
+    try {
+      await fs.mkdir(path.join(opsDir, "src"), { recursive: true });
+      await fs.writeFile(path.join(opsDir, "src", "old.ts"), "import { x } from './x';\nexport const oldVal = x;\n", "utf8");
+      await fs.writeFile(path.join(opsDir, "src", "obsolete.ts"), "export const gone = true;\n", "utf8");
+      await fs.writeFile(path.join(opsDir, "src", "existing.ts"), "export const keep = 1;\n", "utf8");
+      const binBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10, 0x20]);
+      await fs.writeFile(path.join(opsDir, "src", "logo.bin"), binBytes);
+
+      // 1. Validation errors: conflicting modes, missing file, overwrite guard
+      const badCombo = await runApplyEdits({
+        cwd: opsDir,
+        edits: [
+          { path: "src/obsolete.ts", delete: true, moveTo: "src/nope.ts" },
+          { path: "src/old.ts", moveTo: "src/existing.ts" },
+        ],
+      });
+      assert.equal(badCombo.isError, true);
+      assert.match(badCombo.text, /cannot be combined/);
+
+      const collision = await runApplyEdits({
+        cwd: opsDir,
+        edits: [{ path: "src/old.ts", moveTo: "src/existing.ts" }],
+      });
+      assert.equal(collision.isError, true);
+      assert.match(collision.text, /already exists \(set overwrite: true/);
+
+      // 2. dryRun validates delete + moveTo+hunks without modifying disk
+      const dryRes = await runApplyEdits({
+        cwd: opsDir,
+        dryRun: true,
+        edits: [
+          { path: "src/obsolete.ts", delete: true },
+          {
+            path: "src/old.ts",
+            moveTo: "src/nested/new.ts",
+            hunks: [{ target: "import { x } from './x';", replacement: "import { x } from '../x';" }],
+          },
+        ],
+      });
+      assert.equal(dryRes.isError, false);
+      assert.match(dryRes.text, /src\/obsolete\.ts: deleted/);
+      assert.match(dryRes.text, /src\/old\.ts -> src\/nested\/new\.ts: moved & updated/);
+      assert.equal(await fs.access(path.join(opsDir, "src", "obsolete.ts")).then(() => true, () => false), true);
+      assert.equal(await fs.access(path.join(opsDir, "src", "old.ts")).then(() => true, () => false), true);
+
+      // 3. Atomic batch: delete + moveTo with hunks + pure binary moveTo + overwrite moveTo
+      const applyRes = await runApplyEdits({
+        cwd: opsDir,
+        edits: [
+          { path: "src/obsolete.ts", delete: true },
+          {
+            path: "src/old.ts",
+            moveTo: "src/nested/new.ts",
+            hunks: [{ target: "import { x } from './x';", replacement: "import { x } from '../x';" }],
+          },
+          { path: "src/logo.bin", moveTo: "assets/logo.bin" },
+        ],
+      });
+      assert.equal(applyRes.isError, false);
+      assert.equal(await fs.access(path.join(opsDir, "src", "obsolete.ts")).then(() => true, () => false), false);
+      assert.equal(await fs.access(path.join(opsDir, "src", "old.ts")).then(() => true, () => false), false);
+      assert.equal(
+        await fs.readFile(path.join(opsDir, "src", "nested", "new.ts"), "utf8"),
+        "import { x } from '../x';\nexport const oldVal = x;\n",
+      );
+      assert.deepEqual(await fs.readFile(path.join(opsDir, "assets", "logo.bin")), binBytes);
+
+      // 4. Case-only rename (Foo.ts -> foo.ts) works cleanly on Windows/macOS and Linux
+      await fs.writeFile(path.join(opsDir, "src", "MyComp.ts"), "export const c = 1;\n", "utf8");
+      const caseRes = await runApplyEdits({
+        cwd: opsDir,
+        edits: [
+          {
+            path: "src/MyComp.ts",
+            moveTo: "src/myComp.ts",
+            hunks: [{ target: "c = 1", replacement: "c = 2" }],
+          },
+        ],
+      });
+      assert.equal(caseRes.isError, false);
+      const entries = await fs.readdir(path.join(opsDir, "src"));
+      assert.ok(entries.includes("myComp.ts"), `Expected 'myComp.ts' in ${JSON.stringify(entries)}`);
+      assert.equal(await fs.readFile(path.join(opsDir, "src", "myComp.ts"), "utf8"), "export const c = 2;\n");
+
+      // 5. Overwrite moveTo replaces existing file cleanly
+      const owRes = await runApplyEdits({
+        cwd: opsDir,
+        edits: [{ path: "src/myComp.ts", moveTo: "src/existing.ts", overwrite: true }],
+      });
+      assert.equal(owRes.isError, false);
+      assert.equal(await fs.readFile(path.join(opsDir, "src", "existing.ts"), "utf8"), "export const c = 2;\n");
+      assert.equal(await fs.access(path.join(opsDir, "src", "myComp.ts")).then(() => true, () => false), false);
+
+      // 6. Rollback restores deleted and moved files if a later op fails during Phase 2
+      await fs.writeFile(path.join(opsDir, "src", "rb-del.ts"), "delete-me\n", "utf8");
+      await fs.writeFile(path.join(opsDir, "src", "rb-src.ts"), "move-me\n", "utf8");
+      await fs.writeFile(path.join(opsDir, "src", "rb-fail.ts"), "fail-me\n", "utf8");
+      const origRename = fs.rename;
+      let renameCalls = 0;
+      (fs as unknown as { rename: typeof fs.rename }).rename = (async (
+        oldPath: Parameters<typeof fs.rename>[0],
+        newPath: Parameters<typeof fs.rename>[1],
+      ) => {
+        renameCalls++;
+        if (String(newPath).endsWith("rb-fail.ts")) {
+          throw makeErrnoError("EACCES", "simulated write failure");
+        }
+        return origRename(oldPath, newPath);
+      }) as typeof fs.rename;
+      const origWriteFile = fs.writeFile;
+      (fs as unknown as { writeFile: typeof fs.writeFile }).writeFile = (async (
+        file: Parameters<typeof fs.writeFile>[0],
+        data: Parameters<typeof fs.writeFile>[1],
+        options?: Parameters<typeof fs.writeFile>[2],
+      ) => {
+        if (String(file).endsWith("rb-fail.ts")) {
+          throw makeErrnoError("EACCES", "simulated fallback write failure");
+        }
+        return origWriteFile(file, data, options);
+      }) as typeof fs.writeFile;
+      try {
+        const rbRes = await runApplyEdits({
+          cwd: opsDir,
+          edits: [
+            { path: "src/rb-del.ts", delete: true },
+            { path: "src/rb-src.ts", moveTo: "src/rb-dest.ts" },
+            { path: "src/rb-fail.ts", hunks: [{ target: "fail-me", replacement: "never" }] },
+          ],
+        });
+        assert.equal(rbRes.isError, true);
+        assert.match(rbRes.text, /Write failed \(changes rolled back\)/);
+      } finally {
+        (fs as unknown as { rename: typeof fs.rename }).rename = origRename;
+        (fs as unknown as { writeFile: typeof fs.writeFile }).writeFile = origWriteFile;
+      }
+      assert.ok(renameCalls > 0);
+      assert.equal(await fs.readFile(path.join(opsDir, "src", "rb-del.ts"), "utf8"), "delete-me\n");
+      assert.equal(await fs.readFile(path.join(opsDir, "src", "rb-src.ts"), "utf8"), "move-me\n");
+      assert.equal(await fs.access(path.join(opsDir, "src", "rb-dest.ts")).then(() => true, () => false), false);
+    } finally {
+      await fs.rm(opsDir, { recursive: true, force: true });
+    }
   });
 });

@@ -19,7 +19,7 @@ import {
 } from "./tools/read-slices.js";
 import { runChecks, type RunChecksInput } from "./tools/run-checks.js";
 
-const SERVER_VERSION = "0.2.10";
+const SERVER_VERSION = "0.3.0";
 const DEFAULT_PLUGIN_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -99,14 +99,14 @@ function buildApplyEditsToolDefinition(
     ? {
         type: "string",
         description:
-          'JSON array string of 1-50 files to edit or create: [{"path", "hunks"?: [{"target", "replacement", "startLine"?, "endLine"?, "replaceAll"?}], "create"?, "overwrite"?}]. A hunk replaces exact target text (optional 1-based line window; replaceAll replaces every occurrence in it); "create" writes the whole file instead of hunks, and "overwrite" allows replacing an existing file. A native array is also accepted, but this host version can deliver a long array of objects in call_mcp_tool Arguments as [] while a string arrives intact.',
+          'JSON array string of 1-50 files to edit, create, move, or delete: [{"path", "hunks"?: [{"target", "replacement", "startLine"?, "endLine"?, "replaceAll"?}], "create"?, "overwrite"?, "delete"?, "moveTo"?}]. A hunk replaces exact target text; "create" writes the whole file; "delete": true removes the file; "moveTo" moves/renames it (combinable with "hunks" and "overwrite"). A native array is also accepted, but this host version can deliver a long array of objects in call_mcp_tool Arguments as [] while a string arrives intact.',
       }
     : {
         type: "array",
         minItems: 1,
         maxItems: 50,
         description:
-          "Files to edit or create (a JSON array string of the same shape is also accepted).",
+          "Files to edit, create, move, or delete (a JSON array string of the same shape is also accepted).",
         items: {
           type: "object",
           properties: {
@@ -142,7 +142,15 @@ function buildApplyEditsToolDefinition(
             },
             overwrite: {
               type: "boolean",
-              description: "Allow overwriting existing file when using 'create'.",
+              description: "Allow overwriting existing file when using 'create' or 'moveTo'.",
+            },
+            delete: {
+              type: "boolean",
+              description: "Delete this file (mutually exclusive with hunks/create/moveTo).",
+            },
+            moveTo: {
+              type: "string",
+              description: "Move/rename this file to destination path (may combine with hunks and overwrite).",
             },
           },
           required: ["path"],
@@ -152,8 +160,8 @@ function buildApplyEditsToolDefinition(
   return {
     name: "apply_edits",
     description: preferStringEdits
-      ? "Atomically apply multiple non-contiguous hunks across one or more files (all-or-nothing) with optional file creation and inline verify command. Pass 'edits' as one JSON array string."
-      : "Atomically apply multiple non-contiguous hunks across one or more files (all-or-nothing) with optional file creation and inline verify command.",
+      ? "Atomically apply hunks, create, move, or delete files (all-or-nothing) with optional inline verify command. Pass 'edits' as one JSON array string."
+      : "Atomically apply hunks, create, move, or delete files (all-or-nothing) with optional inline verify command.",
     inputSchema: {
       type: "object",
       properties: {
@@ -310,7 +318,7 @@ export function createAgyFastServer(
     {
       name: "batch_search",
       description:
-        "Run multiple read-only text/regex searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output.",
+        "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output.",
       inputSchema: {
         type: "object",
         properties: {
@@ -328,12 +336,12 @@ export function createAgyFastServer(
               properties: {
                 type: {
                   type: "string",
-                  enum: ["text", "regex", "glob", "fuzzy", "git"],
+                  enum: ["text", "regex", "glob", "fuzzy", "git", "def", "refs"],
                 },
                 pattern: {
                   type: "string",
                   description:
-                    "Literal text, regex, fuzzy path query, glob pattern (use * and {a,b}, not regex |), or read-only git subcommand (e.g. 'status --short', 'log -n 5 --oneline').",
+                    "Literal text, regex, symbol name (def/refs), fuzzy path query, glob pattern (use * and {a,b}, not regex |), or read-only git subcommand (e.g. 'status --short', 'log -n 5 --oneline').",
                 },
                 path: {
                   type: "string",

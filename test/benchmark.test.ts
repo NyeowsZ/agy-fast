@@ -382,25 +382,36 @@ describe("benchmark analyzer & CLI", () => {
     // Symlinked transcript files & session dirs are collected, deduplicated, and cycle-safe
     const symlinkDir = path.join(tmpDir, "symlink-runs");
     await fs.mkdir(symlinkDir, { recursive: true });
-    await fs.symlink(
-      path.join(sess1Logs, "transcript_full.jsonl"),
-      path.join(symlinkDir, "s1-link.jsonl"),
-    );
-    await fs.symlink(
-      path.join(brainDir, "sess-1"),
-      path.join(symlinkDir, "s1-dir-link"),
-    );
-    await fs.symlink(
-      path.join(brainDir, "sess-2"),
-      path.join(symlinkDir, "s2-dir-link"),
-    );
-    await fs.symlink(symlinkDir, path.join(symlinkDir, "self-loop"));
+    let canSymlink = true;
+    try {
+      await fs.symlink(
+        path.join(sess1Logs, "transcript_full.jsonl"),
+        path.join(symlinkDir, "s1-link.jsonl"),
+      );
+      await fs.symlink(
+        path.join(brainDir, "sess-1"),
+        path.join(symlinkDir, "s1-dir-link"),
+      );
+      await fs.symlink(
+        path.join(brainDir, "sess-2"),
+        path.join(symlinkDir, "s2-dir-link"),
+      );
+      await fs.symlink(symlinkDir, path.join(symlinkDir, "self-loop"));
+    } catch (err) {
+      if (process.platform === "win32" && (err as NodeJS.ErrnoException)?.code === "EPERM") {
+        canSymlink = false;
+      } else {
+        throw err;
+      }
+    }
 
-    const symlinkFiles = await collectTranscriptFiles([symlinkDir]);
-    assert.equal(symlinkFiles.length, 2);
-    const symlinkMetrics = await analyzePaths([symlinkDir]);
-    assert.equal(symlinkMetrics.sessions, 2);
-    assert.equal(symlinkMetrics.totalOutputTokens, 800);
+    if (canSymlink) {
+      const symlinkFiles = await collectTranscriptFiles([symlinkDir]);
+      assert.equal(symlinkFiles.length, 2);
+      const symlinkMetrics = await analyzePaths([symlinkDir]);
+      assert.equal(symlinkMetrics.sessions, 2);
+      assert.equal(symlinkMetrics.totalOutputTokens, 800);
+    }
   });
 
   it("unwraps double-JSON-encoded args, supports call.arguments, and matches git -C and env-prefixed readonly commands", () => {

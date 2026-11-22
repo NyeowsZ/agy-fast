@@ -654,7 +654,7 @@ var DEFAULT_IGNORE_DIRS = /* @__PURE__ */ new Set([
 ]);
 
 // src/utils/snapshot.ts
-var DEFAULT_SCAN_TIMEOUT_MS = 250;
+var DEFAULT_SCAN_TIMEOUT_MS = process.platform === "win32" ? 1200 : 250;
 var HARDENED_GIT_BASE_ARGS = [
   "--no-optional-locks",
   "-c",
@@ -1361,7 +1361,7 @@ import { spawn as spawn2 } from "node:child_process";
 import { promises as fs2 } from "node:fs";
 import os3 from "node:os";
 import path4 from "node:path";
-var DEFAULT_REPO_URL = "https://github.com/INK-Q/agy-fast.git";
+var DEFAULT_REPO_URL = "https://github.com/NyeowsZ/agy-fast.git";
 var DEFAULT_CHECK_INTERVAL_HOURS = 4;
 var LOCK_STALE_MS = 10 * 60 * 1e3;
 function getHomeDir(env = process.env) {
