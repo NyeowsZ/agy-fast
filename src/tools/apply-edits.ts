@@ -16,10 +16,12 @@ import {
 } from "../utils/output-filter.js";
 
 export interface EditHunk {
-  target: string;
+  target?: string;
   replacement: string;
   startLine?: number;
   endLine?: number;
+  anchorStart?: string;
+  anchorEnd?: string;
   replaceAll?: boolean;
 }
 
@@ -77,6 +79,7 @@ interface PlannedWrite {
   destOriginalMode?: number | null;
   destOriginalSymlinkTarget?: string | null;
   isCaseOnlyRename?: boolean;
+  notes?: string[];
 }
 
 function computeLineStarts(text: string): number[] {
@@ -289,23 +292,162 @@ function findClosestRegionSnippet(
   return `\n  Closest match near line ${bestIdx + 1} (lines ${from}-${to}):\n${snippet.join("\n")}`;
 }
 
+type IndentNormalizedMatchResult =
+  | { status: "none" }
+  | { status: "ambiguous"; lines: number[] }
+  | {
+      status: "unique";
+      start: number;
+      end: number;
+      replacement: string;
+      startLine: number;
+      endLine: number;
+    };
+
+function reindentReplacement(
+  normReplacement: string,
+  targetIndent: string,
+  fileIndent: string,
+): string {
+  if (targetIndent === fileIndent) return normReplacement;
+  const hasTrailingNl = normReplacement.endsWith("\n");
+  const body = hasTrailingNl ? normReplacement.slice(0, -1) : normReplacement;
+  const adjusted = body
+    .split("\n")
+    .map((line) => {
+      if (line.trim().length === 0) return line;
+      if (targetIndent.length > 0 && line.startsWith(targetIndent)) {
+        return `${fileIndent}${line.slice(targetIndent.length)}`;
+      }
+      if (targetIndent.length === 0 && fileIndent.length > 0) {
+        return `${fileIndent}${line}`;
+      }
+      return line;
+    })
+    .join("\n");
+  return hasTrailingNl ? `${adjusted}\n` : adjusted;
+}
+
+function findUniqueIndentNormalizedMatch(
+  normalizedContent: string,
+  lineStarts: number[],
+  fileLines: string[],
+  normTarget: string,
+  normReplacement: string,
+  startLine?: number,
+  endLine?: number,
+): IndentNormalizedMatchResult {
+  const targetHasTrailingNl = normTarget.endsWith("\n");
+  const targetBody = targetHasTrailingNl ? normTarget.slice(0, -1) : normTarget;
+  const targetLines = targetBody.split("\n");
+  const firstNonEmptyIdx = targetLines.findIndex((l) => l.trim().length > 0);
+  if (firstNonEmptyIdx === -1) return { status: "none" };
+
+  const totalLines = fileLines.length;
+  const winStartIdx = Math.max(0, (startLine ?? 1) - 1);
+  const winEndIdx = Math.min(totalLines - 1, (endLine ?? totalLines) - 1);
+  const maxStartIdx = winEndIdx - targetLines.length + 1;
+  if (maxStartIdx < winStartIdx) return { status: "none" };
+
+  const trimmedTarget = targetLines.map((l) => l.trim());
+  const matchedStartIndices: number[] = [];
+
+  for (let i = winStartIdx; i <= maxStartIdx; i++) {
+    let ok = true;
+    for (let k = 0; k < trimmedTarget.length; k++) {
+      if (fileLines[i + k]!.trim() !== trimmedTarget[k]!) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) {
+      matchedStartIndices.push(i);
+      if (matchedStartIndices.length > 10) break;
+    }
+  }
+
+  if (matchedStartIndices.length === 0) return { status: "none" };
+  if (matchedStartIndices.length > 1) {
+    return {
+      status: "ambiguous",
+      lines: matchedStartIndices.map((idx) => idx + 1),
+    };
+  }
+
+  const matchIdx = matchedStartIndices[0]!;
+  const endIdx = matchIdx + targetLines.length - 1;
+  const targetIndent = targetLines[firstNonEmptyIdx]!.match(/^[ \t]*/)?.[0] ?? "";
+  const fileIndent = fileLines[matchIdx + firstNonEmptyIdx]!.match(/^[ \t]*/)?.[0] ?? "";
+
+  const startOffset = lineStarts[matchIdx]!;
+  let endOffset =
+    endIdx + 1 < lineStarts.length
+      ? lineStarts[endIdx + 1]! - 1
+      : normalizedContent.length;
+  if (targetHasTrailingNl && normalizedContent[endOffset] === "\n") {
+    endOffset += 1;
+  }
+
+  let adjustedReplacement = reindentReplacement(
+    normReplacement,
+    targetIndent,
+    fileIndent,
+  );
+  if (
+    !targetHasTrailingNl &&
+    adjustedReplacement.endsWith("\n") &&
+    normalizedContent[endOffset] === "\n"
+  ) {
+    adjustedReplacement = adjustedReplacement.slice(0, -1);
+  }
+
+  return {
+    status: "unique",
+    start: startOffset,
+    end: endOffset,
+    replacement: adjustedReplacement,
+    startLine: matchIdx + 1,
+    endLine: endIdx + 1,
+  };
+}
+
+function findNearbyAnchorLine(
+  fileLines: string[],
+  anchorTrimmed: string,
+  expectedLine: number,
+  radius = 15,
+): number | null {
+  const from = Math.max(0, expectedLine - 1 - radius);
+  const to = Math.min(fileLines.length - 1, expectedLine - 1 + radius);
+  let bestLine: number | null = null;
+  let bestDist = Infinity;
+  for (let i = from; i <= to; i++) {
+    if (fileLines[i]!.trim().includes(anchorTrimmed)) {
+      const dist = Math.abs(i + 1 - expectedLine);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestLine = i + 1;
+      }
+    }
+  }
+  return bestLine;
+}
+
 function planHunksForContent(
   normalizedContent: string,
   hunks: EditHunk[],
   displayPath: string,
-): { newNormalized: string; appliedMatches: number; errors: string[] } {
+): { newNormalized: string; appliedMatches: number; notes: string[]; errors: string[] } {
   const lineStarts = computeLineStarts(normalizedContent);
+  const fileLines = normalizedContent.split("\n");
   const spans: MatchSpan[] = [];
+  const notes: string[] = [];
   const errors: string[] = [];
 
   for (let idx = 0; idx < hunks.length; idx++) {
     const hunk = hunks[idx];
     if (!isPlainObject(hunk)) {
-      errors.push(`${displayPath} hunk #${idx + 1}: must be an object with 'target' and 'replacement'`);
-      continue;
-    }
-    if (typeof hunk.target !== "string" || hunk.target.length === 0) {
-      errors.push(`${displayPath} hunk #${idx + 1}: 'target' must be a non-empty string`);
+      errors.push(`${displayPath} hunk #${idx + 1}: must be an object with 'target' (or startLine/endLine/anchorStart) and 'replacement'`);
       continue;
     }
     if (typeof hunk.replacement !== "string") {
@@ -313,8 +455,106 @@ function planHunksForContent(
       continue;
     }
 
-    const normTarget = hunk.target.replace(/\r\n/g, "\n");
     const normReplacement = hunk.replacement.replace(/\r\n/g, "\n");
+    const isGuardedRangeMode =
+      hunk.target === undefined ||
+      (hunk.target === "" && hunk.anchorStart !== undefined);
+
+    if (isGuardedRangeMode) {
+      if (hunk.replaceAll) {
+        errors.push(`${displayPath} hunk #${idx + 1}: 'replaceAll' cannot be used with guarded line-range edits`);
+        continue;
+      }
+      if (
+        typeof hunk.startLine !== "number" ||
+        !Number.isInteger(hunk.startLine) ||
+        hunk.startLine < 1
+      ) {
+        errors.push(`${displayPath} hunk #${idx + 1}: guarded line-range edit requires positive integer 'startLine' (or provide non-empty 'target')`);
+        continue;
+      }
+      if (
+        typeof hunk.endLine !== "number" ||
+        !Number.isInteger(hunk.endLine) ||
+        hunk.endLine < hunk.startLine
+      ) {
+        errors.push(`${displayPath} hunk #${idx + 1}: guarded line-range edit requires integer 'endLine' >= 'startLine'`);
+        continue;
+      }
+      if (typeof hunk.anchorStart !== "string" || hunk.anchorStart.trim().length === 0) {
+        errors.push(`${displayPath} hunk #${idx + 1}: guarded line-range edit requires non-empty 'anchorStart'`);
+        continue;
+      }
+      if (
+        hunk.endLine > hunk.startLine &&
+        (typeof hunk.anchorEnd !== "string" || hunk.anchorEnd.trim().length === 0)
+      ) {
+        errors.push(`${displayPath} hunk #${idx + 1}: guarded line-range edit spanning multiple lines requires non-empty 'anchorEnd'`);
+        continue;
+      }
+      if (hunk.startLine > fileLines.length || hunk.endLine > fileLines.length) {
+        errors.push(
+          `${displayPath} hunk #${idx + 1}: line range L${hunk.startLine}-L${hunk.endLine} is out of bounds (file has ${fileLines.length} lines)`,
+        );
+        continue;
+      }
+
+      const startActual = fileLines[hunk.startLine - 1]!;
+      const anchorStartTrimmed = hunk.anchorStart.trim();
+      if (!startActual.trim().includes(anchorStartTrimmed)) {
+        const drifted = findNearbyAnchorLine(fileLines, anchorStartTrimmed, hunk.startLine);
+        const driftHint = drifted ? ` Found near L${drifted}.` : "";
+        errors.push(
+          `${displayPath} hunk #${idx + 1}: anchorStart mismatch at L${hunk.startLine} (actual: ${JSON.stringify(startActual.trim())}).${driftHint}`,
+        );
+        continue;
+      }
+
+      if (typeof hunk.anchorEnd === "string" && hunk.anchorEnd.trim().length > 0) {
+        const endActual = fileLines[hunk.endLine - 1]!;
+        const anchorEndTrimmed = hunk.anchorEnd.trim();
+        if (!endActual.trim().includes(anchorEndTrimmed)) {
+          const drifted = findNearbyAnchorLine(fileLines, anchorEndTrimmed, hunk.endLine);
+          const driftHint = drifted ? ` Found near L${drifted}.` : "";
+          errors.push(
+            `${displayPath} hunk #${idx + 1}: anchorEnd mismatch at L${hunk.endLine} (actual: ${JSON.stringify(endActual.trim())}).${driftHint}`,
+          );
+          continue;
+        }
+      }
+
+      const spanStart = lineStarts[hunk.startLine - 1]!;
+      let spanEnd =
+        hunk.endLine < lineStarts.length
+          ? lineStarts[hunk.endLine]! - 1
+          : normalizedContent.length;
+
+      let effectiveReplacement = normReplacement;
+      if (effectiveReplacement === "" && normalizedContent[spanEnd] === "\n") {
+        spanEnd += 1;
+      } else if (
+        effectiveReplacement.endsWith("\n") &&
+        normalizedContent[spanEnd] === "\n"
+      ) {
+        spanEnd += 1;
+      }
+
+      spans.push({
+        start: spanStart,
+        end: spanEnd,
+        replacement: effectiveReplacement,
+        hunkIndex: idx,
+      });
+      notes.push(`range L${hunk.startLine}-L${hunk.endLine}`);
+      continue;
+    }
+
+    if (typeof hunk.target !== "string" || hunk.target.length === 0) {
+      errors.push(`${displayPath} hunk #${idx + 1}: 'target' must be a non-empty string`);
+      continue;
+    }
+
+    const normTarget = hunk.target.replace(/\r\n/g, "\n");
 
     let windowStart = 0;
     let windowEnd = normalizedContent.length;
@@ -344,6 +584,39 @@ function planHunksForContent(
     }
 
     if (foundOffsets.length === 0) {
+      // Safe whitespace/indentation-normalized fallback (unique match only, never on replaceAll)
+      if (!hunk.replaceAll) {
+        const fuzzyRes = findUniqueIndentNormalizedMatch(
+          normalizedContent,
+          lineStarts,
+          fileLines,
+          normTarget,
+          normReplacement,
+          hunk.startLine,
+          hunk.endLine,
+        );
+        if (fuzzyRes.status === "unique") {
+          spans.push({
+            start: fuzzyRes.start,
+            end: fuzzyRes.end,
+            replacement: fuzzyRes.replacement,
+            hunkIndex: idx,
+          });
+          notes.push(
+            fuzzyRes.startLine === fuzzyRes.endLine
+              ? `indent-normalized at L${fuzzyRes.startLine}`
+              : `indent-normalized at L${fuzzyRes.startLine}-L${fuzzyRes.endLine}`,
+          );
+          continue;
+        }
+        if (fuzzyRes.status === "ambiguous") {
+          errors.push(
+            `${displayPath} hunk #${idx + 1}: target text not found verbatim, and whitespace-normalized fallback matched ${fuzzyRes.lines.length} times (lines: ${fuzzyRes.lines.join(", ")}). Provide startLine/endLine or exact indentation.`,
+          );
+          continue;
+        }
+      }
+
       const hasRange = hunk.startLine !== undefined || hunk.endLine !== undefined;
       const rangeNote = hasRange
         ? ` within lines ${hunk.startLine ?? 1}-${hunk.endLine ?? lineStarts.length}`
@@ -410,7 +683,7 @@ function planHunksForContent(
   }
 
   if (errors.length > 0) {
-    return { newNormalized: normalizedContent, appliedMatches: 0, errors };
+    return { newNormalized: normalizedContent, appliedMatches: 0, notes: [], errors };
   }
 
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
@@ -426,7 +699,7 @@ function planHunksForContent(
   }
 
   if (errors.length > 0) {
-    return { newNormalized: normalizedContent, appliedMatches: 0, errors };
+    return { newNormalized: normalizedContent, appliedMatches: 0, notes: [], errors };
   }
 
   const pieces: string[] = [];
@@ -441,6 +714,7 @@ function planHunksForContent(
   return {
     newNormalized: pieces.join(""),
     appliedMatches: spans.length,
+    notes,
     errors: [],
   };
 }
@@ -1094,6 +1368,7 @@ export async function runApplyEdits(
           destOriginalMode,
           destOriginalSymlinkTarget,
           isCaseOnlyRename,
+          notes: planned.notes,
         });
       } else {
         let originalBuffer: Buffer;
@@ -1268,6 +1543,7 @@ export async function runApplyEdits(
       hunkCount: planned.appliedMatches,
       lineDelta,
       created: false,
+      notes: planned.notes,
     });
   }
 
@@ -1299,13 +1575,14 @@ export async function runApplyEdits(
   }
 
   const summaryLines = plans.map((p) => {
+    const noteSuffix = p.notes && p.notes.length > 0 ? ` [${p.notes.join("; ")}]` : "";
     if (p.kind === "delete") {
       return `- ${p.relPath}: deleted`;
     }
     if (p.kind === "move") {
       if (p.hunkCount > 0) {
         const deltaStr = p.lineDelta >= 0 ? `+${p.lineDelta}` : `${p.lineDelta}`;
-        return `- ${p.relPath} -> ${p.destRelPath}: moved & updated (${p.hunkCount} match${p.hunkCount === 1 ? "" : "es"}), lines ${deltaStr}`;
+        return `- ${p.relPath} -> ${p.destRelPath}: moved & updated (${p.hunkCount} match${p.hunkCount === 1 ? "" : "es"}), lines ${deltaStr}${noteSuffix}`;
       }
       return `- ${p.relPath} -> ${p.destRelPath}: moved`;
     }
@@ -1313,7 +1590,7 @@ export async function runApplyEdits(
     const action = p.created
       ? "created"
       : `updated (${p.hunkCount} match${p.hunkCount === 1 ? "" : "es"})`;
-    return `- ${p.relPath}: ${action}, lines ${deltaStr}`;
+    return `- ${p.relPath}: ${action}, lines ${deltaStr}${noteSuffix}`;
   });
 
   if (bestEffort && errors.length > 0) {

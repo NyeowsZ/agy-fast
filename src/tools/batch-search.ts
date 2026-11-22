@@ -36,6 +36,7 @@ export interface SearchQuery {
   caseSensitive?: boolean;
   contextLines?: number;
   maxResults?: number;
+  includeBody?: boolean;
 }
 
 export interface BatchSearchInput {
@@ -1577,10 +1578,12 @@ async function runDefQuery(
 
   // Pure RE2-compatible declaration-anchored candidate pattern (no lookarounds)
   const modPrefix =
-    "(?:(?:export|default|public|private|protected|internal|static|readonly|abstract|override|virtual|async|declare|extern|pub|inline|final|suspend|get|set)\\s+)*";
+    "(?:(?:export|default|public|private|protected|internal|static|readonly|abstract|override|virtual|async|declare|extern|pub|inline|final|suspend|get|set|constexpr|const)\\s+)*";
   const kwDecl = `(?:function\\*?|class|interface|type|enum|const|let|var|def|fn|func(?:\\s*\\([^)]*\\))?|struct|trait|impl|mod|module|namespace|signal|record|protocol|object)\\s+${escaped}\\b`;
   const memberDecl = `${escaped}\\s*(?:<[^>{}]*>)?\\s*(?:\\(|=|:)`;
-  const candidatePattern = `^[\\t ]*${modPrefix}(?:${kwDecl}|${memberDecl})`;
+  const returnTypePrefix = "(?:[A-Za-z_][\\w.:<>\\[\\]*&?, ]{0,60}\\s+)";
+  const typedMethodDecl = `${returnTypePrefix}${escaped}\\s*(?:<[^>{}]*>)?\\s*\\(`;
+  const candidatePattern = `^[\\t ]*${modPrefix}(?:${kwDecl}|${memberDecl}|${typedMethodDecl})`;
 
   const candidateRes = await runTextOrRegexInternal(
     {
@@ -1674,10 +1677,51 @@ async function runDefQuery(
     return `${body}${footer}`;
   }
 
+  const includeBody = Boolean(query.includeBody);
+  const MAX_DEF_INLINE_BODY_LINES = 40;
+  const DEF_LARGE_PREVIEW_LINES = 3;
+
+  const fileLinesMap = new Map<string, string[]>();
+  if (includeBody) {
+    await Promise.all(
+      matchedFiles.map(async ({ file }) => {
+        try {
+          const absPath = resolvePath(file, baseCwd);
+          const raw = await fs.readFile(absPath, "utf8");
+          fileLinesMap.set(file, raw.replace(/\r\n/g, "\n").split("\n"));
+        } catch {
+          // Omit body gracefully if file cannot be read
+        }
+      }),
+    );
+  }
+
   const blocks = matchedFiles.map(({ file, defs }) => {
+    const fileLines = includeBody ? fileLinesMap.get(file) : undefined;
     const lines = defs.map(({ sym, qualifiedName }) => {
       const range = sym.endLine > sym.startLine ? `L${sym.startLine}-L${sym.endLine}` : `L${sym.startLine}`;
-      return `  ${range} [${sym.kind}] ${qualifiedName}`;
+      const header = `  ${range} [${sym.kind}] ${qualifiedName}`;
+      if (!fileLines) return header;
+
+      const startIdx = Math.max(0, sym.startLine - 1);
+      const endIdx = Math.min(fileLines.length - 1, Math.max(startIdx, sym.endLine - 1));
+      const spanLen = endIdx - startIdx + 1;
+      if (spanLen <= MAX_DEF_INLINE_BODY_LINES) {
+        const bodyLines: string[] = [];
+        for (let i = startIdx; i <= endIdx; i++) {
+          bodyLines.push(`    ${i + 1}: ${fileLines[i]!}`);
+        }
+        return `${header}\n${bodyLines.join("\n")}`;
+      }
+      const previewEnd = Math.min(endIdx, startIdx + DEF_LARGE_PREVIEW_LINES - 1);
+      const previewLines: string[] = [];
+      for (let i = startIdx; i <= previewEnd; i++) {
+        previewLines.push(`    ${i + 1}: ${fileLines[i]!}`);
+      }
+      previewLines.push(
+        `    ... (${spanLen} lines total — read with read_file L${sym.startLine}-L${sym.endLine})`,
+      );
+      return `${header}\n${previewLines.join("\n")}`;
     });
     return `${file}\n${lines.join("\n")}`;
   });

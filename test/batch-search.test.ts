@@ -1091,4 +1091,78 @@ describe("batch_search", () => {
       await fs.rm(symDir, { recursive: true, force: true });
     }
   });
+
+  it("finds C#/Java/C++ return-typed methods in type:def and supports includeBody for small vs large defs", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-def-body-"));
+    try {
+      await fs.writeFile(
+        path.join(dir, "UserRepo.cs"),
+        [
+          "public class UserRepo {",
+          "  public async Task<User> GetUserById(int id) {",
+          "    return await db.FindAsync(id);",
+          "  }",
+          "}",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(dir, "Formatter.java"),
+        [
+          "public class Formatter {",
+          "  private String formatUserName(User u) {",
+          "    return u.getName();",
+          "  }",
+          "}",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const bigBody = Array.from({ length: 50 }, (_, i) => `  const step${i} = ${i};`).join("\n");
+      await fs.writeFile(
+        path.join(dir, "helpers.ts"),
+        [
+          "export function smallHelper(a: number) {",
+          "  return a + 1;",
+          "}",
+          "",
+          "export function hugeHelper() {",
+          bigBody,
+          "  return step49;",
+          "}",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      for (const forceNodeFallback of [false, true]) {
+        const res = await runBatchSearch(
+          {
+            cwd: dir,
+            queries: [
+              { type: "def", pattern: "GetUserById" },
+              { type: "def", pattern: "formatUserName" },
+              { type: "def", pattern: "smallHelper", includeBody: true },
+              { type: "def", pattern: "hugeHelper", includeBody: true },
+            ],
+          },
+          { forceNodeFallback },
+        );
+        assert.equal(res.isError, false, res.text);
+        const sections = res.text.split("\n\n");
+        assert.match(sections[0]!, /UserRepo\.cs[\s\S]*GetUserById/);
+        assert.match(sections[1]!, /Formatter\.java[\s\S]*formatUserName/);
+        // Small def (<=40 lines) includes full numbered body
+        assert.match(sections[2]!, /L1-L3 \[function\] smallHelper/);
+        assert.match(sections[2]!, /2:   return a \+ 1;/);
+        // Huge def (>40 lines) includes 3-line preview + read_file pointer
+        assert.match(sections[3]!, /L5-L57 \[function\] hugeHelper/);
+        assert.match(sections[3]!, /53 lines total — read with read_file L5-L57/);
+        assert.doesNotMatch(sections[3]!, /step49/);
+      }
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });

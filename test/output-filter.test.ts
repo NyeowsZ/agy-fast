@@ -528,4 +528,57 @@ describe("output-filter", () => {
     assert.ok(res.text.length <= 1000);
     assert.match(res.text, /tail line 15/);
   });
+
+  it("folds external node_modules/stdlib stack frames while keeping project frames and root errors", () => {
+    const lines = [
+      "TypeError: Cannot read properties of undefined (reading 'id')",
+      "    at handleOrder (src/orders/handler.ts:42:18)",
+      "    at Layer.handle (/repo/node_modules/express/lib/router/layer.js:95:5)",
+      "    at next (/repo/node_modules/express/lib/router/route.js:144:13)",
+      "    at Route.dispatch (/repo/node_modules/express/lib/router/route.js:114:3)",
+      "    at processTicksAndRejections (node:internal/process/task_queues:95:5)",
+      "    at async Server.<anonymous> (node:internal/http:200:12)",
+      "    at runTests (src/orders/handler.test.ts:19:5)",
+      ...Array.from({ length: 22 }, (_, i) => `context info line ${i}`),
+    ];
+
+    const res = formatCompactCommandOutputWithMeta({
+      stdout: lines.join("\n"),
+      stderr: "",
+      exitCode: 1,
+      timedOut: false,
+      maxChars: 3000,
+    });
+    assert.match(res.text, /TypeError: Cannot read properties of undefined/);
+    assert.match(res.text, /handleOrder \(src\/orders\/handler\.ts:42:18\)/);
+    assert.match(res.text, /runTests \(src\/orders\/handler\.test\.ts:19:5\)/);
+    assert.match(res.text, /5 framework\/external stack frames folded/);
+    assert.doesNotMatch(res.text, /express\/lib\/router\/route\.js/);
+  });
+
+  it("groups cascading repeated compiler errors per file/code while preserving distinct codes and summary", () => {
+    const lines = [
+      ...Array.from(
+        { length: 18 },
+        (_, i) => `src/api.ts(${10 + i},5): error TS2339: Property 'missing' does not exist on type 'Order'.`,
+      ),
+      "src/auth.ts(99,2): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.",
+      ...Array.from({ length: 10 }, (_, i) => `build detail ${i}`),
+      "Found 19 errors in 2 files.",
+    ];
+
+    const res = formatCompactCommandOutputWithMeta({
+      stdout: lines.join("\n"),
+      stderr: "",
+      exitCode: 2,
+      timedOut: false,
+      maxChars: 3000,
+    });
+    assert.match(res.text, /src\/api\.ts\(10,5\): error TS2339/);
+    assert.match(res.text, /src\/api\.ts\(11,5\): error TS2339/);
+    assert.match(res.text, /src\/api\.ts: \.\.\. \(\+16 more TS2339 errors at L12, L13/);
+    assert.match(res.text, /src\/auth\.ts\(99,2\): error TS2345/);
+    assert.match(res.text, /Found 19 errors in 2 files\./);
+    assert.doesNotMatch(res.text, /src\/api\.ts\(25,5\): error TS2339/);
+  });
 });

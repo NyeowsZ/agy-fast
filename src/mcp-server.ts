@@ -19,7 +19,7 @@ import {
 } from "./tools/read-slices.js";
 import { runChecks, type RunChecksInput } from "./tools/run-checks.js";
 
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.4.0";
 const DEFAULT_PLUGIN_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -99,7 +99,7 @@ function buildApplyEditsToolDefinition(
     ? {
         type: "string",
         description:
-          'JSON array string of 1-50 files to edit, create, move, or delete: [{"path", "hunks"?: [{"target", "replacement", "startLine"?, "endLine"?, "replaceAll"?}], "create"?, "overwrite"?, "delete"?, "moveTo"?}]. A hunk replaces exact target text; "create" writes the whole file; "delete": true removes the file; "moveTo" moves/renames it (combinable with "hunks" and "overwrite"). A native array is also accepted, but this host version can deliver a long array of objects in call_mcp_tool Arguments as [] while a string arrives intact.',
+          'JSON array string of 1-50 files to edit, create, move, or delete: [{"path", "hunks"?: [{"target"?, "replacement", "startLine"?, "endLine"?, "anchorStart"?, "anchorEnd"?, "replaceAll"?}], "create"?, "overwrite"?, "delete"?, "moveTo"?}]. A hunk replaces exact target text (or guarded startLine..endLine verified by anchorStart/anchorEnd); "create" writes the whole file; "delete": true removes the file; "moveTo" moves/renames it (combinable with "hunks" and "overwrite"). A native array is also accepted, but this host version can deliver a long array of objects in call_mcp_tool Arguments as [] while a string arrives intact.',
       }
     : {
         type: "array",
@@ -116,24 +116,32 @@ function buildApplyEditsToolDefinition(
               items: {
                 type: "object",
                 properties: {
-                  target: { type: "string", description: "Exact text to replace." },
+                  target: { type: "string", description: "Exact text to replace (omit only when using guarded startLine/endLine + anchorStart/anchorEnd)." },
                   replacement: { type: "string", description: "Replacement text." },
                   startLine: {
                     type: "integer",
                     minimum: 1,
-                    description: "Optional 1-based start line to narrow matching.",
+                    description: "Optional 1-based start line to narrow matching, or start of guarded line-range edit.",
                   },
                   endLine: {
                     type: "integer",
                     minimum: 1,
-                    description: "Optional 1-based end line to narrow matching.",
+                    description: "Optional 1-based end line to narrow matching, or end of guarded line-range edit.",
+                  },
+                  anchorStart: {
+                    type: "string",
+                    description: "Guarded range edit: substring verified on startLine when target is omitted.",
+                  },
+                  anchorEnd: {
+                    type: "string",
+                    description: "Guarded range edit: substring verified on endLine when target is omitted and endLine > startLine.",
                   },
                   replaceAll: {
                     type: "boolean",
                     description: "Replace every occurrence in range (default false).",
                   },
                 },
-                required: ["target", "replacement"],
+                required: ["replacement"],
               },
             },
             create: {
@@ -386,6 +394,10 @@ export function createAgyFastServer(
                   minimum: 1,
                   maximum: 200,
                   description: "Max matches/files for this query (default 40).",
+                },
+                includeBody: {
+                  type: "boolean",
+                  description: "For type:'def', inline numbered source body for definitions <=40 lines (larger defs show 3-line preview + read_file pointer).",
                 },
               },
               required: ["type", "pattern"],

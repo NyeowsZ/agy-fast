@@ -5,6 +5,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ---
 
+## [0.4.0] - 2026-11-23
+
+### Added
+
+- **Guarded line-range edits & safe whitespace fallback in `apply_edits`**
+  - Added guarded line-range hunk mode (`startLine`, `endLine`, `anchorStart`, `anchorEnd`, `replacement` with `target` optional) to cut output tokens ~45–50% on medium/large block rewrites while failing fast with ±15-line drift hints on anchor mismatch.
+  - Added a safe unique-match whitespace/indentation-normalized fallback when exact `indexOf` misses (re-indenting `replacement` to match the file and reporting `[indent-normalized at Lstart-Lend]`; ambiguous matches still fail safely).
+- **Inline small definitions (`includeBody`) in `batch_search(type: "def")`**
+  - Added optional `includeBody?: boolean` on `type: "def"` queries: inlines numbered source lines for definitions `<= 40` lines to eliminate follow-up `read_file` turns, while showing a 3-line signature preview + `read_file` pointer for larger definitions.
+- **External stack-frame folding & cascading compiler-error grouping in `output-filter`**
+  - In `compact` failure mode (`> 25` lines), folds contiguous `>= 3` external stack frames (`node_modules`, `node:internal`, Python `site-packages`/stdlib, JVM/Spring/JUnit) while preserving all project frames and root headers.
+  - Groups repeated `(file, code)` compiler diagnostics (`tsc`, `rustc`/generic) when total errors exceed 15, keeping the first 2 full lines per `(file, code)` plus a `(+N more CODE errors at L...)` summary.
+
+### Fixed
+
+- **C#/Java/C++ return-typed methods in `batch_search(type: "def")`**: Extended the RE2-safe candidate regex to match return-typed method declarations (e.g., `Task<User> GetUserById(...)`, `String formatUserName(...)`).
+
+### Changed
+
+- **Routing rules (`rules/AGENTS.md`)**: Added guarded line-range edit and `includeBody` guidance while deduplicating repeated clauses for a net-smaller always-on token footprint.
+
+---
+
 ## [0.3.0] - 2026-11-23
 
 ### Added

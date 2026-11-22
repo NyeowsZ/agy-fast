@@ -1112,4 +1112,167 @@ describe("apply_edits", () => {
       await fs.rm(opsDir, { recursive: true, force: true });
     }
   });
+
+  it("supports safe unique whitespace-normalized fallback and rejects ambiguous indentation matches", async () => {
+    const wsDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-ws-fallback-"));
+    try {
+      const targetFile = path.join(wsDir, "service.ts");
+      await fs.writeFile(
+        targetFile,
+        [
+          "export class Service {",
+          "    compute(x: number) {",
+          "        const doubled = x * 2;",
+          "        return doubled + 1;",
+          "    }",
+          "}",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      // Unique match with 2-space indent instead of 4-space indent -> succeeds & preserves file's 4-space indent
+      const res = await runApplyEdits({
+        cwd: wsDir,
+        edits: [
+          {
+            path: "service.ts",
+            hunks: [
+              {
+                target: "  compute(x: number) {\n    const doubled = x * 2;\n    return doubled + 1;\n  }",
+                replacement: "  compute(x: number) {\n    const tripled = x * 3;\n    return tripled + 1;\n  }",
+              },
+            ],
+          },
+        ],
+      });
+      assert.equal(res.isError, false, res.text);
+      assert.match(res.text, /indent-normalized at L2-L5/);
+      const updated = await fs.readFile(targetFile, "utf8");
+      assert.ok(updated.includes("    compute(x: number) {\n      const tripled = x * 3;\n      return tripled + 1;\n    }"));
+
+      // Ambiguous whitespace-normalized match must fail rather than guess
+      const ambigFile = path.join(wsDir, "dup.ts");
+      await fs.writeFile(
+        ambigFile,
+        ["function a() {", "    return 42;", "}", "function b() {", "    return 42;", "}", ""].join("\n"),
+        "utf8",
+      );
+      const ambigRes = await runApplyEdits({
+        cwd: wsDir,
+        edits: [
+          {
+            path: "dup.ts",
+            hunks: [{ target: "\treturn 42;", replacement: "\treturn 99;" }],
+          },
+        ],
+      });
+      assert.equal(ambigRes.isError, true);
+      assert.match(ambigRes.text, /whitespace-normalized fallback matched 2 times \(lines: 2, 5\)/);
+    } finally {
+      await fs.rm(wsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("supports guarded line-range edits with anchorStart/anchorEnd and fails safely on drift", async () => {
+    const rngDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-guarded-range-"));
+    try {
+      const file = path.join(rngDir, "handler.ts");
+      await fs.writeFile(
+        file,
+        [
+          "export function header() {",
+          "  return 'ok';",
+          "}",
+          "export function processItem(x: number) {",
+          "  const a = x + 1;",
+          "  const b = a * 2;",
+          "  return b;",
+          "}",
+          "export const TAIL = true;",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      // Missing anchorEnd on multi-line range must fail
+      const missingEnd = await runApplyEdits({
+        cwd: rngDir,
+        edits: [
+          {
+            path: "handler.ts",
+            hunks: [
+              {
+                startLine: 4,
+                endLine: 8,
+                anchorStart: "export function processItem",
+                replacement: "export function processItem(x: number) { return x; }",
+              },
+            ],
+          },
+        ],
+      });
+      assert.equal(missingEnd.isError, true);
+      assert.match(missingEnd.text, /requires non-empty 'anchorEnd'/);
+
+      // Drifted startLine reports exact nearby line without modifying file
+      const drifted = await runApplyEdits({
+        cwd: rngDir,
+        edits: [
+          {
+            path: "handler.ts",
+            hunks: [
+              {
+                startLine: 6,
+                endLine: 8,
+                anchorStart: "export function processItem",
+                anchorEnd: "}",
+                replacement: "never",
+              },
+            ],
+          },
+        ],
+      });
+      assert.equal(drifted.isError, true);
+      assert.match(drifted.text, /anchorStart mismatch at L6/);
+      assert.match(drifted.text, /Found near L4/);
+
+      // Valid guarded line-range edit succeeds and preserves surrounding lines
+      const ok = await runApplyEdits({
+        cwd: rngDir,
+        edits: [
+          {
+            path: "handler.ts",
+            hunks: [
+              {
+                startLine: 4,
+                endLine: 8,
+                anchorStart: "export function processItem",
+                anchorEnd: "}",
+                replacement: "export function processItem(x: number) {\n  return (x + 1) * 2;\n}",
+              },
+            ],
+          },
+        ],
+      });
+      assert.equal(ok.isError, false, ok.text);
+      assert.match(ok.text, /range L4-L8/);
+      const content = await fs.readFile(file, "utf8");
+      assert.equal(
+        content,
+        [
+          "export function header() {",
+          "  return 'ok';",
+          "}",
+          "export function processItem(x: number) {",
+          "  return (x + 1) * 2;",
+          "}",
+          "export const TAIL = true;",
+          "",
+        ].join("\n"),
+      );
+    } finally {
+      await fs.rm(rngDir, { recursive: true, force: true });
+    }
+  });
 });

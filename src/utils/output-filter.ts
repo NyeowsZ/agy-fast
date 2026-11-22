@@ -609,6 +609,225 @@ function foldGreenBuildPhaseLines(lines: string[]): {
   return { lines: out, collapsedLines };
 }
 
+const MIN_STACK_FOLD_LINES = 3;
+const SMALL_FAILURE_VERBATIM_LINES = 25;
+
+const EXTERNAL_JS_FRAME_PATTERN =
+  /^\s+at\s+.*(?:\(|\/|\\)(?:node_modules(?:\/|\\)|node:internal|internal\/)/;
+const EXTERNAL_PY_FRAME_PATTERN =
+  /^\s+File\s+"[^"]*(?:site-packages|dist-packages|[/\\]lib[/\\]python[\d.]*[/\\])[^"]*"/i;
+const EXTERNAL_JVM_FRAME_PATTERN =
+  /^\s+at\s+(?:java\.|javax\.|sun\.|jdk\.|org\.junit\.|org\.springframework\.|org\.gradle\.)/;
+const ANY_STACK_FRAME_PATTERN = /^\s+(?:at\s+\S|File\s+")/;
+
+function isExternalStackFrameLine(line: string): boolean {
+  return (
+    EXTERNAL_JS_FRAME_PATTERN.test(line) ||
+    EXTERNAL_PY_FRAME_PATTERN.test(line) ||
+    EXTERNAL_JVM_FRAME_PATTERN.test(line)
+  );
+}
+
+function foldExternalStackFrames(lines: string[]): {
+  lines: string[];
+  collapsedLines: number;
+} {
+  if (lines.length <= SMALL_FAILURE_VERBATIM_LINES) {
+    return { lines, collapsedLines: 0 };
+  }
+
+  // Check if any non-external (project) stack frames exist in this output
+  let hasProjectFrame = false;
+  for (const line of lines) {
+    if (ANY_STACK_FRAME_PATTERN.test(line) && !isExternalStackFrameLine(line)) {
+      hasProjectFrame = true;
+      break;
+    }
+  }
+
+  const out: string[] = [];
+  let collapsedLines = 0;
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i]!;
+    if (!isExternalStackFrameLine(line)) {
+      out.push(line);
+      i++;
+      continue;
+    }
+
+    const runStart = i;
+    let frameCount = 0;
+    while (i < lines.length && isExternalStackFrameLine(lines[i]!)) {
+      const isPy = EXTERNAL_PY_FRAME_PATTERN.test(lines[i]!);
+      i++;
+      frameCount++;
+      // Python tracebacks include an indented source preview line right after File "..."
+      if (
+        isPy &&
+        i < lines.length &&
+        /^\s+\S/.test(lines[i]!) &&
+        !ANY_STACK_FRAME_PATTERN.test(lines[i]!) &&
+        !ROOT_CAUSE_HEADER_PATTERN.test(lines[i]!) &&
+        !isErrorLine(lines[i]!)
+      ) {
+        i++;
+      }
+    }
+
+    // If there are no project frames at all, preserve the first external frame so root location stays visible
+    let foldFrom = runStart;
+    let foldableFrames = frameCount;
+    if (!hasProjectFrame && frameCount > 0) {
+      out.push(lines[runStart]!);
+      foldFrom = runStart + 1;
+      if (
+        EXTERNAL_PY_FRAME_PATTERN.test(lines[runStart]!) &&
+        foldFrom < i &&
+        !isExternalStackFrameLine(lines[foldFrom]!)
+      ) {
+        out.push(lines[foldFrom]!);
+        foldFrom++;
+      }
+      foldableFrames = frameCount - 1;
+    }
+
+    const foldLineCount = i - foldFrom;
+    if (foldableFrames >= MIN_STACK_FOLD_LINES && foldLineCount >= MIN_STACK_FOLD_LINES) {
+      const placeholder = `    ... (${foldableFrames} framework/external stack frames folded)`;
+      let origChars = foldLineCount - 1;
+      for (let j = foldFrom; j < i; j++) origChars += lines[j]!.length;
+      if (placeholder.length < origChars) {
+        out.push(placeholder);
+        collapsedLines += foldLineCount;
+      } else {
+        for (let j = foldFrom; j < i; j++) out.push(lines[j]!);
+      }
+    } else {
+      for (let j = foldFrom; j < i; j++) out.push(lines[j]!);
+    }
+  }
+
+  return { lines: out, collapsedLines };
+}
+
+interface ParsedCompilerError {
+  file: string;
+  lineNum: string;
+  code: string;
+}
+
+const TSC_PAREN_ERROR_PATTERN = /^([^\s(][^(]*?)\((\d+),\d+\):\s*error\s+(TS\d+):/i;
+const TSC_COLON_ERROR_PATTERN = /^([^\s:][^:]*?):(\d+):\d+\s*-\s*error\s+(TS\d+):/i;
+const GENERIC_CODE_ERROR_PATTERN = /^([^\s:][^:]*?):(\d+):\d+:\s*error\[([A-Z]\d+)\]:/;
+
+function parseCompilerErrorLine(line: string): ParsedCompilerError | null {
+  const m =
+    TSC_PAREN_ERROR_PATTERN.exec(line) ||
+    TSC_COLON_ERROR_PATTERN.exec(line) ||
+    GENERIC_CODE_ERROR_PATTERN.exec(line);
+  if (!m) return null;
+  return { file: m[1]!, lineNum: m[2]!, code: m[3]! };
+}
+
+function foldCascadingCompilerErrors(lines: string[]): {
+  lines: string[];
+  collapsedLines: number;
+} {
+  if (lines.length <= SMALL_FAILURE_VERBATIM_LINES) {
+    return { lines, collapsedLines: 0 };
+  }
+
+  const parsed: Array<ParsedCompilerError | null> = lines.map(parseCompilerErrorLine);
+  let totalErrors = 0;
+  const countsByKey = new Map<string, number>();
+  for (const p of parsed) {
+    if (!p) continue;
+    totalErrors++;
+    const key = `${p.file}\0${p.code}`;
+    countsByKey.set(key, (countsByKey.get(key) ?? 0) + 1);
+  }
+
+  // Only fold when there are > 15 compiler error lines and at least one (file, code) repeats > 3 times
+  if (totalErrors <= 15) {
+    return { lines, collapsedLines: 0 };
+  }
+  let hasRepeats = false;
+  for (const count of countsByKey.values()) {
+    if (count > 3) {
+      hasRepeats = true;
+      break;
+    }
+  }
+  if (!hasRepeats) {
+    return { lines, collapsedLines: 0 };
+  }
+
+  const KEEP_PER_FILE_CODE = 2;
+  const seenByKey = new Map<string, number>();
+  const omittedLinesByKey = new Map<string, { file: string; code: string; lineNums: string[]; insertAtOutIdx: number }>();
+  const out: string[] = [];
+  let collapsedLines = 0;
+
+  let i = 0;
+  while (i < lines.length) {
+    const p = parsed[i];
+    if (!p) {
+      out.push(lines[i]!);
+      i++;
+      continue;
+    }
+
+    const key = `${p.file}\0${p.code}`;
+    const totalForKey = countsByKey.get(key) ?? 0;
+    const seen = (seenByKey.get(key) ?? 0) + 1;
+    seenByKey.set(key, seen);
+
+    // Collect any indented diagnostic continuation lines belonging to this compiler error
+    const blockStart = i;
+    i++;
+    while (
+      i < lines.length &&
+      parsed[i] === null &&
+      /^(?:  |\t)/.test(lines[i]!) &&
+      !ROOT_CAUSE_HEADER_PATTERN.test(lines[i]!)
+    ) {
+      i++;
+    }
+
+    if (totalForKey <= 3 || seen <= KEEP_PER_FILE_CODE) {
+      for (let j = blockStart; j < i; j++) out.push(lines[j]!);
+      if (totalForKey > 3 && seen === KEEP_PER_FILE_CODE) {
+        omittedLinesByKey.set(key, {
+          file: p.file,
+          code: p.code,
+          lineNums: [],
+          insertAtOutIdx: out.length,
+        });
+        out.push(""); // Placeholder replaced below
+      }
+    } else {
+      const rec = omittedLinesByKey.get(key);
+      if (rec) {
+        rec.lineNums.push(`L${p.lineNum}`);
+      }
+      collapsedLines += i - blockStart;
+    }
+  }
+
+  for (const rec of omittedLinesByKey.values()) {
+    const sample =
+      rec.lineNums.length <= 8
+        ? rec.lineNums.join(", ")
+        : `${rec.lineNums.slice(0, 8).join(", ")}, ...`;
+    out[rec.insertAtOutIdx] =
+      `${rec.file}: ... (+${rec.lineNums.length} more ${rec.code} errors at ${sample})`;
+  }
+
+  return { lines: out, collapsedLines };
+}
+
 function formatOmittedLinesMarker(omitted: number, markTruncated: boolean): string {
   return markTruncated
     ? `... [truncated: ${omitted} lines omitted] ...`
@@ -1040,7 +1259,14 @@ export function prepareCompactCommandOutput(
   const filteredLines = splitLines.filter((line) => !isFailureNoiseLine(line));
   const cleanedLines = filteredLines.length > 0 ? filteredLines : splitLines;
 
-  const { lines: foldedLines, collapsedLines } = foldGreenBuildPhaseLines(cleanedLines);
+  const greenFolded = foldGreenBuildPhaseLines(cleanedLines);
+  const stackFolded = foldExternalStackFrames(greenFolded.lines);
+  const errorFolded = foldCascadingCompilerErrors(stackFolded.lines);
+  const foldedLines = errorFolded.lines;
+  const collapsedLines =
+    greenFolded.collapsedLines +
+    stackFolded.collapsedLines +
+    errorFolded.collapsedLines;
   return {
     kind: "fail-lines",
     bodyText: foldedLines.join("\n"),

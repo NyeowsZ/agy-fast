@@ -1596,6 +1596,155 @@ function foldGreenBuildPhaseLines(lines) {
   }
   return { lines: out, collapsedLines };
 }
+var MIN_STACK_FOLD_LINES = 3;
+var SMALL_FAILURE_VERBATIM_LINES = 25;
+var EXTERNAL_JS_FRAME_PATTERN = /^\s+at\s+.*(?:\(|\/|\\)(?:node_modules(?:\/|\\)|node:internal|internal\/)/;
+var EXTERNAL_PY_FRAME_PATTERN = /^\s+File\s+"[^"]*(?:site-packages|dist-packages|[/\\]lib[/\\]python[\d.]*[/\\])[^"]*"/i;
+var EXTERNAL_JVM_FRAME_PATTERN = /^\s+at\s+(?:java\.|javax\.|sun\.|jdk\.|org\.junit\.|org\.springframework\.|org\.gradle\.)/;
+var ANY_STACK_FRAME_PATTERN = /^\s+(?:at\s+\S|File\s+")/;
+function isExternalStackFrameLine(line) {
+  return EXTERNAL_JS_FRAME_PATTERN.test(line) || EXTERNAL_PY_FRAME_PATTERN.test(line) || EXTERNAL_JVM_FRAME_PATTERN.test(line);
+}
+function foldExternalStackFrames(lines) {
+  if (lines.length <= SMALL_FAILURE_VERBATIM_LINES) {
+    return { lines, collapsedLines: 0 };
+  }
+  let hasProjectFrame = false;
+  for (const line of lines) {
+    if (ANY_STACK_FRAME_PATTERN.test(line) && !isExternalStackFrameLine(line)) {
+      hasProjectFrame = true;
+      break;
+    }
+  }
+  const out = [];
+  let collapsedLines = 0;
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!isExternalStackFrameLine(line)) {
+      out.push(line);
+      i++;
+      continue;
+    }
+    const runStart = i;
+    let frameCount = 0;
+    while (i < lines.length && isExternalStackFrameLine(lines[i])) {
+      const isPy = EXTERNAL_PY_FRAME_PATTERN.test(lines[i]);
+      i++;
+      frameCount++;
+      if (isPy && i < lines.length && /^\s+\S/.test(lines[i]) && !ANY_STACK_FRAME_PATTERN.test(lines[i]) && !ROOT_CAUSE_HEADER_PATTERN.test(lines[i]) && !isErrorLine(lines[i])) {
+        i++;
+      }
+    }
+    let foldFrom = runStart;
+    let foldableFrames = frameCount;
+    if (!hasProjectFrame && frameCount > 0) {
+      out.push(lines[runStart]);
+      foldFrom = runStart + 1;
+      if (EXTERNAL_PY_FRAME_PATTERN.test(lines[runStart]) && foldFrom < i && !isExternalStackFrameLine(lines[foldFrom])) {
+        out.push(lines[foldFrom]);
+        foldFrom++;
+      }
+      foldableFrames = frameCount - 1;
+    }
+    const foldLineCount = i - foldFrom;
+    if (foldableFrames >= MIN_STACK_FOLD_LINES && foldLineCount >= MIN_STACK_FOLD_LINES) {
+      const placeholder = `    ... (${foldableFrames} framework/external stack frames folded)`;
+      let origChars = foldLineCount - 1;
+      for (let j = foldFrom; j < i; j++) origChars += lines[j].length;
+      if (placeholder.length < origChars) {
+        out.push(placeholder);
+        collapsedLines += foldLineCount;
+      } else {
+        for (let j = foldFrom; j < i; j++) out.push(lines[j]);
+      }
+    } else {
+      for (let j = foldFrom; j < i; j++) out.push(lines[j]);
+    }
+  }
+  return { lines: out, collapsedLines };
+}
+var TSC_PAREN_ERROR_PATTERN = /^([^\s(][^(]*?)\((\d+),\d+\):\s*error\s+(TS\d+):/i;
+var TSC_COLON_ERROR_PATTERN = /^([^\s:][^:]*?):(\d+):\d+\s*-\s*error\s+(TS\d+):/i;
+var GENERIC_CODE_ERROR_PATTERN = /^([^\s:][^:]*?):(\d+):\d+:\s*error\[([A-Z]\d+)\]:/;
+function parseCompilerErrorLine(line) {
+  const m = TSC_PAREN_ERROR_PATTERN.exec(line) || TSC_COLON_ERROR_PATTERN.exec(line) || GENERIC_CODE_ERROR_PATTERN.exec(line);
+  if (!m) return null;
+  return { file: m[1], lineNum: m[2], code: m[3] };
+}
+function foldCascadingCompilerErrors(lines) {
+  if (lines.length <= SMALL_FAILURE_VERBATIM_LINES) {
+    return { lines, collapsedLines: 0 };
+  }
+  const parsed = lines.map(parseCompilerErrorLine);
+  let totalErrors = 0;
+  const countsByKey = /* @__PURE__ */ new Map();
+  for (const p of parsed) {
+    if (!p) continue;
+    totalErrors++;
+    const key = `${p.file}\0${p.code}`;
+    countsByKey.set(key, (countsByKey.get(key) ?? 0) + 1);
+  }
+  if (totalErrors <= 15) {
+    return { lines, collapsedLines: 0 };
+  }
+  let hasRepeats = false;
+  for (const count of countsByKey.values()) {
+    if (count > 3) {
+      hasRepeats = true;
+      break;
+    }
+  }
+  if (!hasRepeats) {
+    return { lines, collapsedLines: 0 };
+  }
+  const KEEP_PER_FILE_CODE = 2;
+  const seenByKey = /* @__PURE__ */ new Map();
+  const omittedLinesByKey = /* @__PURE__ */ new Map();
+  const out = [];
+  let collapsedLines = 0;
+  let i = 0;
+  while (i < lines.length) {
+    const p = parsed[i];
+    if (!p) {
+      out.push(lines[i]);
+      i++;
+      continue;
+    }
+    const key = `${p.file}\0${p.code}`;
+    const totalForKey = countsByKey.get(key) ?? 0;
+    const seen = (seenByKey.get(key) ?? 0) + 1;
+    seenByKey.set(key, seen);
+    const blockStart = i;
+    i++;
+    while (i < lines.length && parsed[i] === null && /^(?:  |\t)/.test(lines[i]) && !ROOT_CAUSE_HEADER_PATTERN.test(lines[i])) {
+      i++;
+    }
+    if (totalForKey <= 3 || seen <= KEEP_PER_FILE_CODE) {
+      for (let j = blockStart; j < i; j++) out.push(lines[j]);
+      if (totalForKey > 3 && seen === KEEP_PER_FILE_CODE) {
+        omittedLinesByKey.set(key, {
+          file: p.file,
+          code: p.code,
+          lineNums: [],
+          insertAtOutIdx: out.length
+        });
+        out.push("");
+      }
+    } else {
+      const rec = omittedLinesByKey.get(key);
+      if (rec) {
+        rec.lineNums.push(`L${p.lineNum}`);
+      }
+      collapsedLines += i - blockStart;
+    }
+  }
+  for (const rec of omittedLinesByKey.values()) {
+    const sample = rec.lineNums.length <= 8 ? rec.lineNums.join(", ") : `${rec.lineNums.slice(0, 8).join(", ")}, ...`;
+    out[rec.insertAtOutIdx] = `${rec.file}: ... (+${rec.lineNums.length} more ${rec.code} errors at ${sample})`;
+  }
+  return { lines: out, collapsedLines };
+}
 function formatOmittedLinesMarker(omitted, markTruncated) {
   return markTruncated ? `... [truncated: ${omitted} lines omitted] ...` : `... (${omitted} lines omitted) ...`;
 }
@@ -1912,7 +2061,11 @@ ${tail}` : "TIMED OUT (no output)",
   const splitLines = combined.split("\n");
   const filteredLines = splitLines.filter((line) => !isFailureNoiseLine(line));
   const cleanedLines = filteredLines.length > 0 ? filteredLines : splitLines;
-  const { lines: foldedLines, collapsedLines } = foldGreenBuildPhaseLines(cleanedLines);
+  const greenFolded = foldGreenBuildPhaseLines(cleanedLines);
+  const stackFolded = foldExternalStackFrames(greenFolded.lines);
+  const errorFolded = foldCascadingCompilerErrors(stackFolded.lines);
+  const foldedLines = errorFolded.lines;
+  const collapsedLines = greenFolded.collapsedLines + stackFolded.collapsedLines + errorFolded.collapsedLines;
   return {
     kind: "fail-lines",
     bodyText: foldedLines.join("\n"),
@@ -2731,26 +2884,187 @@ function findClosestRegionSnippet(normalizedContent, normTarget, rangeStartLine,
   Closest match near line ${bestIdx + 1} (lines ${from}-${to}):
 ${snippet.join("\n")}`;
 }
+function reindentReplacement(normReplacement, targetIndent, fileIndent) {
+  if (targetIndent === fileIndent) return normReplacement;
+  const hasTrailingNl = normReplacement.endsWith("\n");
+  const body = hasTrailingNl ? normReplacement.slice(0, -1) : normReplacement;
+  const adjusted = body.split("\n").map((line) => {
+    if (line.trim().length === 0) return line;
+    if (targetIndent.length > 0 && line.startsWith(targetIndent)) {
+      return `${fileIndent}${line.slice(targetIndent.length)}`;
+    }
+    if (targetIndent.length === 0 && fileIndent.length > 0) {
+      return `${fileIndent}${line}`;
+    }
+    return line;
+  }).join("\n");
+  return hasTrailingNl ? `${adjusted}
+` : adjusted;
+}
+function findUniqueIndentNormalizedMatch(normalizedContent, lineStarts, fileLines, normTarget, normReplacement, startLine, endLine) {
+  const targetHasTrailingNl = normTarget.endsWith("\n");
+  const targetBody = targetHasTrailingNl ? normTarget.slice(0, -1) : normTarget;
+  const targetLines = targetBody.split("\n");
+  const firstNonEmptyIdx = targetLines.findIndex((l) => l.trim().length > 0);
+  if (firstNonEmptyIdx === -1) return { status: "none" };
+  const totalLines = fileLines.length;
+  const winStartIdx = Math.max(0, (startLine ?? 1) - 1);
+  const winEndIdx = Math.min(totalLines - 1, (endLine ?? totalLines) - 1);
+  const maxStartIdx = winEndIdx - targetLines.length + 1;
+  if (maxStartIdx < winStartIdx) return { status: "none" };
+  const trimmedTarget = targetLines.map((l) => l.trim());
+  const matchedStartIndices = [];
+  for (let i = winStartIdx; i <= maxStartIdx; i++) {
+    let ok = true;
+    for (let k = 0; k < trimmedTarget.length; k++) {
+      if (fileLines[i + k].trim() !== trimmedTarget[k]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) {
+      matchedStartIndices.push(i);
+      if (matchedStartIndices.length > 10) break;
+    }
+  }
+  if (matchedStartIndices.length === 0) return { status: "none" };
+  if (matchedStartIndices.length > 1) {
+    return {
+      status: "ambiguous",
+      lines: matchedStartIndices.map((idx) => idx + 1)
+    };
+  }
+  const matchIdx = matchedStartIndices[0];
+  const endIdx = matchIdx + targetLines.length - 1;
+  const targetIndent = targetLines[firstNonEmptyIdx].match(/^[ \t]*/)?.[0] ?? "";
+  const fileIndent = fileLines[matchIdx + firstNonEmptyIdx].match(/^[ \t]*/)?.[0] ?? "";
+  const startOffset = lineStarts[matchIdx];
+  let endOffset = endIdx + 1 < lineStarts.length ? lineStarts[endIdx + 1] - 1 : normalizedContent.length;
+  if (targetHasTrailingNl && normalizedContent[endOffset] === "\n") {
+    endOffset += 1;
+  }
+  let adjustedReplacement = reindentReplacement(
+    normReplacement,
+    targetIndent,
+    fileIndent
+  );
+  if (!targetHasTrailingNl && adjustedReplacement.endsWith("\n") && normalizedContent[endOffset] === "\n") {
+    adjustedReplacement = adjustedReplacement.slice(0, -1);
+  }
+  return {
+    status: "unique",
+    start: startOffset,
+    end: endOffset,
+    replacement: adjustedReplacement,
+    startLine: matchIdx + 1,
+    endLine: endIdx + 1
+  };
+}
+function findNearbyAnchorLine(fileLines, anchorTrimmed, expectedLine, radius = 15) {
+  const from = Math.max(0, expectedLine - 1 - radius);
+  const to = Math.min(fileLines.length - 1, expectedLine - 1 + radius);
+  let bestLine = null;
+  let bestDist = Infinity;
+  for (let i = from; i <= to; i++) {
+    if (fileLines[i].trim().includes(anchorTrimmed)) {
+      const dist = Math.abs(i + 1 - expectedLine);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestLine = i + 1;
+      }
+    }
+  }
+  return bestLine;
+}
 function planHunksForContent(normalizedContent, hunks, displayPath) {
   const lineStarts = computeLineStarts(normalizedContent);
+  const fileLines = normalizedContent.split("\n");
   const spans = [];
+  const notes = [];
   const errors = [];
   for (let idx = 0; idx < hunks.length; idx++) {
     const hunk = hunks[idx];
     if (!isPlainObject(hunk)) {
-      errors.push(`${displayPath} hunk #${idx + 1}: must be an object with 'target' and 'replacement'`);
-      continue;
-    }
-    if (typeof hunk.target !== "string" || hunk.target.length === 0) {
-      errors.push(`${displayPath} hunk #${idx + 1}: 'target' must be a non-empty string`);
+      errors.push(`${displayPath} hunk #${idx + 1}: must be an object with 'target' (or startLine/endLine/anchorStart) and 'replacement'`);
       continue;
     }
     if (typeof hunk.replacement !== "string") {
       errors.push(`${displayPath} hunk #${idx + 1}: 'replacement' must be a string`);
       continue;
     }
-    const normTarget = hunk.target.replace(/\r\n/g, "\n");
     const normReplacement = hunk.replacement.replace(/\r\n/g, "\n");
+    const isGuardedRangeMode = hunk.target === void 0 || hunk.target === "" && hunk.anchorStart !== void 0;
+    if (isGuardedRangeMode) {
+      if (hunk.replaceAll) {
+        errors.push(`${displayPath} hunk #${idx + 1}: 'replaceAll' cannot be used with guarded line-range edits`);
+        continue;
+      }
+      if (typeof hunk.startLine !== "number" || !Number.isInteger(hunk.startLine) || hunk.startLine < 1) {
+        errors.push(`${displayPath} hunk #${idx + 1}: guarded line-range edit requires positive integer 'startLine' (or provide non-empty 'target')`);
+        continue;
+      }
+      if (typeof hunk.endLine !== "number" || !Number.isInteger(hunk.endLine) || hunk.endLine < hunk.startLine) {
+        errors.push(`${displayPath} hunk #${idx + 1}: guarded line-range edit requires integer 'endLine' >= 'startLine'`);
+        continue;
+      }
+      if (typeof hunk.anchorStart !== "string" || hunk.anchorStart.trim().length === 0) {
+        errors.push(`${displayPath} hunk #${idx + 1}: guarded line-range edit requires non-empty 'anchorStart'`);
+        continue;
+      }
+      if (hunk.endLine > hunk.startLine && (typeof hunk.anchorEnd !== "string" || hunk.anchorEnd.trim().length === 0)) {
+        errors.push(`${displayPath} hunk #${idx + 1}: guarded line-range edit spanning multiple lines requires non-empty 'anchorEnd'`);
+        continue;
+      }
+      if (hunk.startLine > fileLines.length || hunk.endLine > fileLines.length) {
+        errors.push(
+          `${displayPath} hunk #${idx + 1}: line range L${hunk.startLine}-L${hunk.endLine} is out of bounds (file has ${fileLines.length} lines)`
+        );
+        continue;
+      }
+      const startActual = fileLines[hunk.startLine - 1];
+      const anchorStartTrimmed = hunk.anchorStart.trim();
+      if (!startActual.trim().includes(anchorStartTrimmed)) {
+        const drifted = findNearbyAnchorLine(fileLines, anchorStartTrimmed, hunk.startLine);
+        const driftHint = drifted ? ` Found near L${drifted}.` : "";
+        errors.push(
+          `${displayPath} hunk #${idx + 1}: anchorStart mismatch at L${hunk.startLine} (actual: ${JSON.stringify(startActual.trim())}).${driftHint}`
+        );
+        continue;
+      }
+      if (typeof hunk.anchorEnd === "string" && hunk.anchorEnd.trim().length > 0) {
+        const endActual = fileLines[hunk.endLine - 1];
+        const anchorEndTrimmed = hunk.anchorEnd.trim();
+        if (!endActual.trim().includes(anchorEndTrimmed)) {
+          const drifted = findNearbyAnchorLine(fileLines, anchorEndTrimmed, hunk.endLine);
+          const driftHint = drifted ? ` Found near L${drifted}.` : "";
+          errors.push(
+            `${displayPath} hunk #${idx + 1}: anchorEnd mismatch at L${hunk.endLine} (actual: ${JSON.stringify(endActual.trim())}).${driftHint}`
+          );
+          continue;
+        }
+      }
+      const spanStart = lineStarts[hunk.startLine - 1];
+      let spanEnd = hunk.endLine < lineStarts.length ? lineStarts[hunk.endLine] - 1 : normalizedContent.length;
+      let effectiveReplacement = normReplacement;
+      if (effectiveReplacement === "" && normalizedContent[spanEnd] === "\n") {
+        spanEnd += 1;
+      } else if (effectiveReplacement.endsWith("\n") && normalizedContent[spanEnd] === "\n") {
+        spanEnd += 1;
+      }
+      spans.push({
+        start: spanStart,
+        end: spanEnd,
+        replacement: effectiveReplacement,
+        hunkIndex: idx
+      });
+      notes.push(`range L${hunk.startLine}-L${hunk.endLine}`);
+      continue;
+    }
+    if (typeof hunk.target !== "string" || hunk.target.length === 0) {
+      errors.push(`${displayPath} hunk #${idx + 1}: 'target' must be a non-empty string`);
+      continue;
+    }
+    const normTarget = hunk.target.replace(/\r\n/g, "\n");
     let windowStart = 0;
     let windowEnd = normalizedContent.length;
     try {
@@ -2777,6 +3091,35 @@ function planHunksForContent(normalizedContent, hunks, displayPath) {
       pos = found + Math.max(1, normTarget.length);
     }
     if (foundOffsets.length === 0) {
+      if (!hunk.replaceAll) {
+        const fuzzyRes = findUniqueIndentNormalizedMatch(
+          normalizedContent,
+          lineStarts,
+          fileLines,
+          normTarget,
+          normReplacement,
+          hunk.startLine,
+          hunk.endLine
+        );
+        if (fuzzyRes.status === "unique") {
+          spans.push({
+            start: fuzzyRes.start,
+            end: fuzzyRes.end,
+            replacement: fuzzyRes.replacement,
+            hunkIndex: idx
+          });
+          notes.push(
+            fuzzyRes.startLine === fuzzyRes.endLine ? `indent-normalized at L${fuzzyRes.startLine}` : `indent-normalized at L${fuzzyRes.startLine}-L${fuzzyRes.endLine}`
+          );
+          continue;
+        }
+        if (fuzzyRes.status === "ambiguous") {
+          errors.push(
+            `${displayPath} hunk #${idx + 1}: target text not found verbatim, and whitespace-normalized fallback matched ${fuzzyRes.lines.length} times (lines: ${fuzzyRes.lines.join(", ")}). Provide startLine/endLine or exact indentation.`
+          );
+          continue;
+        }
+      }
       const hasRange = hunk.startLine !== void 0 || hunk.endLine !== void 0;
       const rangeNote = hasRange ? ` within lines ${hunk.startLine ?? 1}-${hunk.endLine ?? lineStarts.length}` : "";
       let hint = "";
@@ -2826,7 +3169,7 @@ function planHunksForContent(normalizedContent, hunks, displayPath) {
     }
   }
   if (errors.length > 0) {
-    return { newNormalized: normalizedContent, appliedMatches: 0, errors };
+    return { newNormalized: normalizedContent, appliedMatches: 0, notes: [], errors };
   }
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
   for (let i = 1; i < spans.length; i++) {
@@ -2840,7 +3183,7 @@ function planHunksForContent(normalizedContent, hunks, displayPath) {
     }
   }
   if (errors.length > 0) {
-    return { newNormalized: normalizedContent, appliedMatches: 0, errors };
+    return { newNormalized: normalizedContent, appliedMatches: 0, notes: [], errors };
   }
   const pieces = [];
   let cursor = 0;
@@ -2853,6 +3196,7 @@ function planHunksForContent(normalizedContent, hunks, displayPath) {
   return {
     newNormalized: pieces.join(""),
     appliedMatches: spans.length,
+    notes,
     errors: []
   };
 }
@@ -3424,7 +3768,8 @@ async function runApplyEdits(input) {
           destOriginalBuffer,
           destOriginalMode,
           destOriginalSymlinkTarget,
-          isCaseOnlyRename
+          isCaseOnlyRename,
+          notes: planned2.notes
         });
       } else {
         let originalBuffer;
@@ -3584,7 +3929,8 @@ async function runApplyEdits(input) {
       newContent: finalContent,
       hunkCount: planned.appliedMatches,
       lineDelta,
-      created: false
+      created: false,
+      notes: planned.notes
     });
   }
   const bestEffort = Boolean(input.bestEffort);
@@ -3610,19 +3956,20 @@ async function runApplyEdits(input) {
     }
   }
   const summaryLines = plans.map((p) => {
+    const noteSuffix = p.notes && p.notes.length > 0 ? ` [${p.notes.join("; ")}]` : "";
     if (p.kind === "delete") {
       return `- ${p.relPath}: deleted`;
     }
     if (p.kind === "move") {
       if (p.hunkCount > 0) {
         const deltaStr2 = p.lineDelta >= 0 ? `+${p.lineDelta}` : `${p.lineDelta}`;
-        return `- ${p.relPath} -> ${p.destRelPath}: moved & updated (${p.hunkCount} match${p.hunkCount === 1 ? "" : "es"}), lines ${deltaStr2}`;
+        return `- ${p.relPath} -> ${p.destRelPath}: moved & updated (${p.hunkCount} match${p.hunkCount === 1 ? "" : "es"}), lines ${deltaStr2}${noteSuffix}`;
       }
       return `- ${p.relPath} -> ${p.destRelPath}: moved`;
     }
     const deltaStr = p.lineDelta >= 0 ? `+${p.lineDelta}` : `${p.lineDelta}`;
     const action = p.created ? "created" : `updated (${p.hunkCount} match${p.hunkCount === 1 ? "" : "es"})`;
-    return `- ${p.relPath}: ${action}, lines ${deltaStr}`;
+    return `- ${p.relPath}: ${action}, lines ${deltaStr}${noteSuffix}`;
   });
   if (bestEffort && errors.length > 0) {
     const totalFiles = mergedByPath.size;
@@ -7678,10 +8025,12 @@ async function runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache) {
   const maxResults = clampInt(query.maxResults ?? 40, 1, 200);
   const leafName = extractLeafSymbolName(rawPattern);
   const escaped = escapeRegExpLiteral(leafName);
-  const modPrefix = "(?:(?:export|default|public|private|protected|internal|static|readonly|abstract|override|virtual|async|declare|extern|pub|inline|final|suspend|get|set)\\s+)*";
+  const modPrefix = "(?:(?:export|default|public|private|protected|internal|static|readonly|abstract|override|virtual|async|declare|extern|pub|inline|final|suspend|get|set|constexpr|const)\\s+)*";
   const kwDecl = `(?:function\\*?|class|interface|type|enum|const|let|var|def|fn|func(?:\\s*\\([^)]*\\))?|struct|trait|impl|mod|module|namespace|signal|record|protocol|object)\\s+${escaped}\\b`;
   const memberDecl = `${escaped}\\s*(?:<[^>{}]*>)?\\s*(?:\\(|=|:)`;
-  const candidatePattern = `^[\\t ]*${modPrefix}(?:${kwDecl}|${memberDecl})`;
+  const returnTypePrefix = "(?:[A-Za-z_][\\w.:<>\\[\\]*&?, ]{0,60}\\s+)";
+  const typedMethodDecl = `${returnTypePrefix}${escaped}\\s*(?:<[^>{}]*>)?\\s*\\(`;
+  const candidatePattern = `^[\\t ]*${modPrefix}(?:${kwDecl}|${memberDecl}|${typedMethodDecl})`;
   const candidateRes = await runTextOrRegexInternal(
     {
       ...query,
@@ -7763,10 +8112,49 @@ async function runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache) {
 ... [truncated; showing ${matchedFiles.length} files]` : "";
     return `${body}${footer2}`;
   }
+  const includeBody = Boolean(query.includeBody);
+  const MAX_DEF_INLINE_BODY_LINES = 40;
+  const DEF_LARGE_PREVIEW_LINES = 3;
+  const fileLinesMap = /* @__PURE__ */ new Map();
+  if (includeBody) {
+    await Promise.all(
+      matchedFiles.map(async ({ file }) => {
+        try {
+          const absPath = resolvePath(file, baseCwd);
+          const raw = await fs4.readFile(absPath, "utf8");
+          fileLinesMap.set(file, raw.replace(/\r\n/g, "\n").split("\n"));
+        } catch {
+        }
+      })
+    );
+  }
   const blocks = matchedFiles.map(({ file, defs }) => {
+    const fileLines = includeBody ? fileLinesMap.get(file) : void 0;
     const lines = defs.map(({ sym, qualifiedName }) => {
       const range = sym.endLine > sym.startLine ? `L${sym.startLine}-L${sym.endLine}` : `L${sym.startLine}`;
-      return `  ${range} [${sym.kind}] ${qualifiedName}`;
+      const header = `  ${range} [${sym.kind}] ${qualifiedName}`;
+      if (!fileLines) return header;
+      const startIdx = Math.max(0, sym.startLine - 1);
+      const endIdx = Math.min(fileLines.length - 1, Math.max(startIdx, sym.endLine - 1));
+      const spanLen = endIdx - startIdx + 1;
+      if (spanLen <= MAX_DEF_INLINE_BODY_LINES) {
+        const bodyLines = [];
+        for (let i = startIdx; i <= endIdx; i++) {
+          bodyLines.push(`    ${i + 1}: ${fileLines[i]}`);
+        }
+        return `${header}
+${bodyLines.join("\n")}`;
+      }
+      const previewEnd = Math.min(endIdx, startIdx + DEF_LARGE_PREVIEW_LINES - 1);
+      const previewLines = [];
+      for (let i = startIdx; i <= previewEnd; i++) {
+        previewLines.push(`    ${i + 1}: ${fileLines[i]}`);
+      }
+      previewLines.push(
+        `    ... (${spanLen} lines total \u2014 read with read_file L${sym.startLine}-L${sym.endLine})`
+      );
+      return `${header}
+${previewLines.join("\n")}`;
     });
     return `${file}
 ${lines.join("\n")}`;
@@ -8607,7 +8995,7 @@ function clampInt2(val, min, max, fallback) {
 }
 
 // src/mcp-server.ts
-var SERVER_VERSION = "0.3.0";
+var SERVER_VERSION = "0.4.0";
 var DEFAULT_PLUGIN_ROOT = path7.resolve(
   path7.dirname(fileURLToPath2(import.meta.url)),
   ".."
@@ -8656,7 +9044,7 @@ function buildApplyEditsToolDefinition(compat) {
   const preferStringEdits = compat.editsFormat === "string";
   const editsSchema = preferStringEdits ? {
     type: "string",
-    description: 'JSON array string of 1-50 files to edit, create, move, or delete: [{"path", "hunks"?: [{"target", "replacement", "startLine"?, "endLine"?, "replaceAll"?}], "create"?, "overwrite"?, "delete"?, "moveTo"?}]. A hunk replaces exact target text; "create" writes the whole file; "delete": true removes the file; "moveTo" moves/renames it (combinable with "hunks" and "overwrite"). A native array is also accepted, but this host version can deliver a long array of objects in call_mcp_tool Arguments as [] while a string arrives intact.'
+    description: 'JSON array string of 1-50 files to edit, create, move, or delete: [{"path", "hunks"?: [{"target"?, "replacement", "startLine"?, "endLine"?, "anchorStart"?, "anchorEnd"?, "replaceAll"?}], "create"?, "overwrite"?, "delete"?, "moveTo"?}]. A hunk replaces exact target text (or guarded startLine..endLine verified by anchorStart/anchorEnd); "create" writes the whole file; "delete": true removes the file; "moveTo" moves/renames it (combinable with "hunks" and "overwrite"). A native array is also accepted, but this host version can deliver a long array of objects in call_mcp_tool Arguments as [] while a string arrives intact.'
   } : {
     type: "array",
     minItems: 1,
@@ -8671,24 +9059,32 @@ function buildApplyEditsToolDefinition(compat) {
           items: {
             type: "object",
             properties: {
-              target: { type: "string", description: "Exact text to replace." },
+              target: { type: "string", description: "Exact text to replace (omit only when using guarded startLine/endLine + anchorStart/anchorEnd)." },
               replacement: { type: "string", description: "Replacement text." },
               startLine: {
                 type: "integer",
                 minimum: 1,
-                description: "Optional 1-based start line to narrow matching."
+                description: "Optional 1-based start line to narrow matching, or start of guarded line-range edit."
               },
               endLine: {
                 type: "integer",
                 minimum: 1,
-                description: "Optional 1-based end line to narrow matching."
+                description: "Optional 1-based end line to narrow matching, or end of guarded line-range edit."
+              },
+              anchorStart: {
+                type: "string",
+                description: "Guarded range edit: substring verified on startLine when target is omitted."
+              },
+              anchorEnd: {
+                type: "string",
+                description: "Guarded range edit: substring verified on endLine when target is omitted and endLine > startLine."
               },
               replaceAll: {
                 type: "boolean",
                 description: "Replace every occurrence in range (default false)."
               }
             },
-            required: ["target", "replacement"]
+            required: ["replacement"]
           }
         },
         create: {
@@ -8915,6 +9311,10 @@ function createAgyFastServer(options = {}) {
                   minimum: 1,
                   maximum: 200,
                   description: "Max matches/files for this query (default 40)."
+                },
+                includeBody: {
+                  type: "boolean",
+                  description: "For type:'def', inline numbered source body for definitions <=40 lines (larger defs show 3-line preview + read_file pointer)."
                 }
               },
               required: ["type", "pattern"]
