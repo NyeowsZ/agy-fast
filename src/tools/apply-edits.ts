@@ -28,6 +28,8 @@ export interface FileEdit {
   hunks?: EditHunk[];
   create?: string;
   overwrite?: boolean;
+  delete?: boolean;
+  moveTo?: string;
 }
 
 export interface VerifySpec {
@@ -55,6 +57,7 @@ interface MatchSpan {
 }
 
 interface PlannedWrite {
+  kind: "write" | "delete" | "move";
   absPath: string;
   writeTargetPath: string;
   relPath: string;
@@ -62,10 +65,18 @@ interface PlannedWrite {
   originalBuffer: Buffer | null;
   originalMode: number | null;
   originalSymlinkTarget?: string | null;
-  newContent: string;
+  newContent: string | Buffer;
   hunkCount: number;
   lineDelta: number;
   created: boolean;
+  destAbsPath?: string;
+  destTargetPath?: string;
+  destRelPath?: string;
+  destExisted?: boolean;
+  destOriginalBuffer?: Buffer | null;
+  destOriginalMode?: number | null;
+  destOriginalSymlinkTarget?: string | null;
+  isCaseOnlyRename?: boolean;
 }
 
 function computeLineStarts(text: string): number[] {
@@ -445,75 +456,169 @@ function countLines(text: string): number {
   return count;
 }
 
+async function writeContentAtomic(
+  target: string,
+  content: string | Buffer,
+  originalMode: number | null,
+  originalSymlinkTarget?: string | null,
+  onTargetTouched?: () => void,
+): Promise<void> {
+  const dir = path.dirname(target);
+  await fs.mkdir(dir, { recursive: true });
+  const tmpPath = `${target}.agy-fast-tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    if (Buffer.isBuffer(content)) {
+      await fs.writeFile(tmpPath, content);
+    } else {
+      await fs.writeFile(tmpPath, content, "utf8");
+    }
+    if (originalMode !== null && process.platform !== "win32") {
+      await fs.chmod(tmpPath, originalMode);
+    }
+  } catch (tmpErr) {
+    await fs.unlink(tmpPath).catch(() => {});
+    throw tmpErr;
+  }
+
+  onTargetTouched?.();
+  try {
+    await fs.rename(tmpPath, target);
+  } catch {
+    // Fallback if rename across filesystems or directory permissions fails
+    await fs.unlink(tmpPath).catch(() => {});
+    if (originalSymlinkTarget) {
+      await fs.unlink(target).catch(() => {});
+    }
+    if (Buffer.isBuffer(content)) {
+      await fs.writeFile(target, content);
+    } else {
+      await fs.writeFile(target, content, "utf8");
+    }
+    if (originalMode !== null && process.platform !== "win32") {
+      await fs.chmod(target, originalMode).catch(() => {});
+    }
+  }
+}
+
 async function commitPlannedWrites(plans: PlannedWrite[]): Promise<void> {
   const written: PlannedWrite[] = [];
 
   try {
     for (const plan of plans) {
-      const target = plan.writeTargetPath;
-      const dir = path.dirname(target);
-      await fs.mkdir(dir, { recursive: true });
-      const tmpPath = `${target}.agy-fast-tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      try {
-        await fs.writeFile(tmpPath, plan.newContent, "utf8");
-        if (plan.originalMode !== null && process.platform !== "win32") {
-          await fs.chmod(tmpPath, plan.originalMode);
-        }
-      } catch (tmpErr) {
-        try {
-          await fs.unlink(tmpPath);
-        } catch {
-          // ignore cleanup failure
-        }
-        throw tmpErr;
+      if (plan.kind === "delete") {
+        written.push(plan);
+        await fs.unlink(plan.writeTargetPath);
+        continue;
       }
 
-      try {
-        await fs.rename(tmpPath, target);
-        written.push(plan);
-      } catch (renameErr) {
-        // Fallback if rename across filesystems or directory permissions fails
-        try {
-          await fs.unlink(tmpPath);
-        } catch {
-          // ignore cleanup failure
-        }
-        written.push(plan);
-        if (plan.originalSymlinkTarget) {
-          // Replace dangling symlink itself instead of following it on fallback write
+      if (plan.kind === "move") {
+        const dest = plan.destTargetPath!;
+        if (plan.isCaseOnlyRename) {
+          written.push(plan);
+          // Two-step hop via temp name so case-insensitive filesystems (Windows/macOS) update casing cleanly
+          const hopPath = `${dest}.agy-fast-hop-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          await fs.rename(plan.writeTargetPath, hopPath);
           try {
-            await fs.unlink(target);
-          } catch {
-            // ignore unlink failure
+            if (plan.hunkCount > 0) {
+              if (Buffer.isBuffer(plan.newContent)) {
+                await fs.writeFile(hopPath, plan.newContent);
+              } else {
+                await fs.writeFile(hopPath, plan.newContent, "utf8");
+              }
+            }
+            await fs.rename(hopPath, dest);
+          } catch (hopErr) {
+            await fs.rename(hopPath, plan.writeTargetPath).catch(() => {});
+            throw hopErr;
           }
+        } else {
+          await writeContentAtomic(
+            dest,
+            plan.newContent,
+            plan.originalMode,
+            plan.destOriginalSymlinkTarget,
+            () => written.push(plan),
+          );
+          await fs.unlink(plan.writeTargetPath);
         }
-        await fs.writeFile(target, plan.newContent, "utf8");
-        if (plan.originalMode !== null && process.platform !== "win32") {
-          try {
-            await fs.chmod(target, plan.originalMode);
-          } catch {
-            // ignore chmod failure on unsupported filesystems
-          }
-        }
-        void renameErr;
+        continue;
       }
+
+      // Standard write (create or hunks)
+      await writeContentAtomic(
+        plan.writeTargetPath,
+        plan.newContent,
+        plan.originalMode,
+        plan.originalSymlinkTarget,
+        () => written.push(plan),
+      );
     }
   } catch (err) {
-    // Rollback all previously written files
+    // Rollback all previously applied operations in reverse order
     for (let i = written.length - 1; i >= 0; i--) {
       const item = written[i]!;
       const target = item.writeTargetPath;
       try {
-        if (item.originalSymlinkTarget) {
-          await fs.unlink(target).catch(() => {});
-          await fs.symlink(item.originalSymlinkTarget, target);
-        } else if (item.existed && item.originalBuffer !== null) {
-          await fs.writeFile(target, item.originalBuffer);
-          if (item.originalMode !== null && process.platform !== "win32") {
-            await fs.chmod(target, item.originalMode);
+        if (item.kind === "delete") {
+          if (item.originalSymlinkTarget) {
+            await fs.unlink(target).catch(() => {});
+            await fs.symlink(item.originalSymlinkTarget, target);
+          } else if (item.originalBuffer !== null) {
+            await fs.mkdir(path.dirname(target), { recursive: true });
+            await fs.writeFile(target, item.originalBuffer);
+            if (item.originalMode !== null && process.platform !== "win32") {
+              await fs.chmod(target, item.originalMode);
+            }
           }
-        } else if (!item.existed) {
-          await fs.unlink(target);
+        } else if (item.kind === "move") {
+          const dest = item.destTargetPath!;
+          if (item.isCaseOnlyRename) {
+            const hopPath = `${target}.agy-fast-rb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            await fs.rename(dest, hopPath).catch(() => {});
+            await fs.rename(hopPath, target).catch(() => {});
+            if (item.originalBuffer !== null) {
+              await fs.writeFile(target, item.originalBuffer);
+              if (item.originalMode !== null && process.platform !== "win32") {
+                await fs.chmod(target, item.originalMode);
+              }
+            }
+          } else {
+            // Restore source
+            if (item.originalSymlinkTarget) {
+              await fs.unlink(target).catch(() => {});
+              await fs.symlink(item.originalSymlinkTarget, target);
+            } else if (item.originalBuffer !== null) {
+              await fs.mkdir(path.dirname(target), { recursive: true });
+              await fs.writeFile(target, item.originalBuffer);
+              if (item.originalMode !== null && process.platform !== "win32") {
+                await fs.chmod(target, item.originalMode);
+              }
+            }
+            // Restore or remove destination
+            if (item.destOriginalSymlinkTarget) {
+              await fs.unlink(dest).catch(() => {});
+              await fs.symlink(item.destOriginalSymlinkTarget, dest);
+            } else if (item.destExisted && item.destOriginalBuffer !== null && item.destOriginalBuffer !== undefined) {
+              await fs.writeFile(dest, item.destOriginalBuffer);
+              if (item.destOriginalMode !== null && item.destOriginalMode !== undefined && process.platform !== "win32") {
+                await fs.chmod(dest, item.destOriginalMode);
+              }
+            } else if (!item.destExisted) {
+              await fs.unlink(dest).catch(() => {});
+            }
+          }
+        } else {
+          if (item.originalSymlinkTarget) {
+            await fs.unlink(target).catch(() => {});
+            await fs.symlink(item.originalSymlinkTarget, target);
+          } else if (item.existed && item.originalBuffer !== null) {
+            await fs.writeFile(target, item.originalBuffer);
+            if (item.originalMode !== null && process.platform !== "win32") {
+              await fs.chmod(target, item.originalMode);
+            }
+          } else if (!item.existed) {
+            await fs.unlink(target).catch(() => {});
+          }
         }
       } catch {
         // Best-effort rollback
@@ -620,6 +725,8 @@ export async function runApplyEdits(
       hunks: normalizedHunks,
       create: rawEntry.create as string | undefined,
       overwrite: rawEntry.overwrite as boolean | undefined,
+      delete: rawEntry.delete as boolean | undefined,
+      moveTo: rawEntry.moveTo as string | undefined,
     });
   }
   if (corruptedItems.length > 0) {
@@ -670,6 +777,8 @@ export async function runApplyEdits(
   }
 
   const baseCwd = resolvePath(input.cwd || process.cwd());
+  const isCaseInsensitiveFs = process.platform === "win32" || process.platform === "darwin";
+  const pathKey = (p: string) => (isCaseInsensitiveFs ? p.toLowerCase() : p);
 
   // Merge entries targeting the same resolved file (including symlink aliases and symlinked parent dirs)
   const mergedByPath = new Map<
@@ -680,6 +789,8 @@ export async function runApplyEdits(
       relPath: string;
       create?: string;
       overwrite?: boolean;
+      delete?: boolean;
+      moveTo?: string;
       hunks: EditHunk[];
     }
   >();
@@ -691,32 +802,65 @@ export async function runApplyEdits(
       errors.push(`edits[${i}]: 'path' must be a non-empty string`);
       continue;
     }
+    if (entry.delete !== undefined && typeof entry.delete !== "boolean") {
+      errors.push(`edits[${i}]: 'delete' must be a boolean`);
+      continue;
+    }
+    if (entry.moveTo !== undefined && (typeof entry.moveTo !== "string" || !entry.moveTo.trim())) {
+      errors.push(`edits[${i}]: 'moveTo' must be a non-empty string path`);
+      continue;
+    }
 
     const absPath = resolvePath(entry.path, baseCwd);
+    const hasDelete = entry.delete === true;
+    const hasMoveTo = typeof entry.moveTo === "string" && entry.moveTo.trim().length > 0;
+    const hasCreate = typeof entry.create === "string";
+    const hasHunks = Array.isArray(entry.hunks) && entry.hunks.length > 0;
+
     let writeTargetPath = absPath;
+    let isSourceSymlink = false;
     try {
-      // Canonicalize existing paths (including symlinks and symlinked parent dirs like /var -> /private/var)
-      writeTargetPath = await fs.realpath(absPath);
+      const lst = await fs.lstat(absPath);
+      isSourceSymlink = lst.isSymbolicLink();
     } catch {
-      // File does not exist yet or dangling symlink — still canonicalize existing parent dir
-      // so `sym_dir/new.ts` and `real_dir/new.ts` deduplicate cleanly.
+      // ignore
+    }
+    if (hasDelete && isSourceSymlink) {
+      // Delete the symlink itself rather than its target; canonicalize parent dir only
       try {
         const realParent = await fs.realpath(path.dirname(absPath));
         writeTargetPath = path.join(realParent, path.basename(absPath));
       } catch {
-        // Parent directory does not exist yet — keep absPath
+        // keep absPath
+      }
+    } else {
+      try {
+        // Canonicalize existing paths (including symlinks and symlinked parent dirs like /var -> /private/var)
+        writeTargetPath = await fs.realpath(absPath);
+      } catch {
+        // File does not exist yet or dangling symlink — still canonicalize existing parent dir
+        // so `sym_dir/new.ts` and `real_dir/new.ts` deduplicate cleanly.
+        try {
+          const realParent = await fs.realpath(path.dirname(absPath));
+          writeTargetPath = path.join(realParent, path.basename(absPath));
+        } catch {
+          // Parent directory does not exist yet — keep absPath
+        }
       }
     }
-    const relPath = toPosixPath(path.relative(baseCwd, absPath)) || path.basename(absPath);
-    const hasCreate = typeof entry.create === "string";
-    const hasHunks = Array.isArray(entry.hunks) && entry.hunks.length > 0;
 
-    if (!hasCreate && !hasHunks) {
-      errors.push(`${relPath}: must specify either non-empty 'hunks' or 'create'`);
+    const relPath = toPosixPath(path.relative(baseCwd, absPath)) || path.basename(absPath);
+
+    if (!hasCreate && !hasHunks && !hasDelete && !hasMoveTo) {
+      errors.push(`${relPath}: must specify 'hunks', 'create', 'delete: true', or 'moveTo'`);
       continue;
     }
-    if (hasCreate && hasHunks) {
-      errors.push(`${relPath}: cannot specify both 'create' and 'hunks' on the same entry`);
+    if (hasDelete && (hasCreate || hasHunks || hasMoveTo)) {
+      errors.push(`${relPath}: 'delete' cannot be combined with 'create', 'hunks', or 'moveTo'`);
+      continue;
+    }
+    if (hasCreate && (hasHunks || hasMoveTo)) {
+      errors.push(`${relPath}: cannot specify both 'create' and '${hasHunks ? "hunks" : "moveTo"}' on the same entry`);
       continue;
     }
 
@@ -728,14 +872,26 @@ export async function runApplyEdits(
         relPath,
         create: hasCreate ? entry.create : undefined,
         overwrite: entry.overwrite,
+        delete: hasDelete ? true : undefined,
+        moveTo: hasMoveTo ? entry.moveTo!.trim() : undefined,
         hunks: hasHunks ? [...entry.hunks!] : [],
       });
     } else {
-      if (hasCreate || existing.create !== undefined) {
-        errors.push(`${relPath}: duplicate entries cannot mix 'create' with other edits`);
+      if (hasCreate || existing.create !== undefined || hasDelete || existing.delete) {
+        errors.push(`${relPath}: duplicate entries cannot mix 'create' or 'delete' with other edits`);
         continue;
       }
-      existing.hunks.push(...entry.hunks!);
+      if (hasMoveTo) {
+        if (existing.moveTo && existing.moveTo !== entry.moveTo!.trim()) {
+          errors.push(`${relPath}: conflicting 'moveTo' destinations on duplicate entries`);
+          continue;
+        }
+        existing.moveTo = entry.moveTo!.trim();
+        if (entry.overwrite !== undefined) existing.overwrite = entry.overwrite;
+      }
+      if (hasHunks) {
+        existing.hunks.push(...entry.hunks!);
+      }
     }
   }
 
@@ -746,9 +902,245 @@ export async function runApplyEdits(
     };
   }
 
+  // Track claimed move destination paths to catch cross-entry collisions in Phase 1
+  const claimedDestinations = new Set<string>();
+
   // Phase 1: validate and plan every file in memory
   const plans: PlannedWrite[] = [];
   for (const item of mergedByPath.values()) {
+    // 1. Delete existing file (or symlink)
+    if (item.delete) {
+      let originalBuffer: Buffer | null = null;
+      let originalMode: number | null = null;
+      let originalSymlinkTarget: string | null = null;
+      try {
+        const lst = await fs.lstat(item.writeTargetPath);
+        if (lst.isSymbolicLink()) {
+          originalSymlinkTarget = await fs.readlink(item.writeTargetPath);
+        } else if (lst.isDirectory()) {
+          errors.push(`${item.relPath}: cannot delete a directory`);
+          continue;
+        } else {
+          originalMode = lst.mode & 0o7777;
+          originalBuffer = await fs.readFile(item.writeTargetPath);
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+          errors.push(`${item.relPath}: file does not exist`);
+        } else {
+          errors.push(`${item.relPath}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        continue;
+      }
+
+      plans.push({
+        kind: "delete",
+        absPath: item.absPath,
+        writeTargetPath: item.writeTargetPath,
+        relPath: item.relPath,
+        existed: true,
+        originalBuffer,
+        originalMode,
+        originalSymlinkTarget,
+        newContent: "",
+        hunkCount: 0,
+        lineDelta: 0,
+        created: false,
+      });
+      continue;
+    }
+
+    // 2. Move file (optionally applying hunks atomically during the move)
+    if (item.moveTo !== undefined) {
+      const destAbsPath = resolvePath(item.moveTo, baseCwd);
+      let destTargetPath = destAbsPath;
+      try {
+        const realDestParent = await fs.realpath(path.dirname(destAbsPath));
+        destTargetPath = path.join(realDestParent, path.basename(destAbsPath));
+      } catch {
+        // Destination parent directory does not exist yet
+      }
+      const destRelPath = toPosixPath(path.relative(baseCwd, destAbsPath)) || path.basename(destAbsPath);
+
+      if (destTargetPath === item.writeTargetPath) {
+        errors.push(`${item.relPath}: 'moveTo' destination is the same as source path`);
+        continue;
+      }
+
+      const isCaseOnlyRename =
+        isCaseInsensitiveFs &&
+        path.dirname(item.writeTargetPath).toLowerCase() === path.dirname(destTargetPath).toLowerCase() &&
+        path.basename(item.writeTargetPath).toLowerCase() === path.basename(destTargetPath).toLowerCase() &&
+        path.basename(item.writeTargetPath) !== path.basename(destTargetPath);
+
+      const destKey = pathKey(destTargetPath);
+      if (claimedDestinations.has(destKey)) {
+        errors.push(`${item.relPath}: multiple entries target the same destination '${destRelPath}'`);
+        continue;
+      }
+      if (!isCaseOnlyRename) {
+        let collidesWithOtherSource = false;
+        for (const other of mergedByPath.values()) {
+          if (other !== item && pathKey(other.writeTargetPath) === destKey && !other.delete && !other.moveTo) {
+            collidesWithOtherSource = true;
+            break;
+          }
+        }
+        if (collidesWithOtherSource) {
+          errors.push(`${item.relPath}: 'moveTo' destination '${destRelPath}' collides with another edit in the same batch`);
+          continue;
+        }
+      }
+
+      // Inspect destination (skip collision check on case-only rename of the same file)
+      let destExisted = false;
+      let destOriginalBuffer: Buffer | null = null;
+      let destOriginalMode: number | null = null;
+      let destOriginalSymlinkTarget: string | null = null;
+      if (!isCaseOnlyRename) {
+        try {
+          const destLst = await fs.lstat(destTargetPath);
+          if (destLst.isSymbolicLink()) {
+            try {
+              const destSt = await fs.stat(destTargetPath);
+              if (destSt.isDirectory()) {
+                errors.push(`${item.relPath}: destination '${destRelPath}' is a directory`);
+                continue;
+              }
+              destExisted = true;
+              if (!item.overwrite) {
+                errors.push(
+                  `${item.relPath}: destination '${destRelPath}' already exists (set overwrite: true to replace it)`,
+                );
+                continue;
+              }
+              destOriginalMode = destSt.mode & 0o7777;
+              destOriginalBuffer = await fs.readFile(destTargetPath);
+            } catch (statErr) {
+              if ((statErr as NodeJS.ErrnoException)?.code === "ENOENT") {
+                destExisted = true;
+                if (!item.overwrite) {
+                  errors.push(
+                    `${item.relPath}: destination '${destRelPath}' is a dangling symlink (set overwrite: true to replace it)`,
+                  );
+                  continue;
+                }
+                destOriginalSymlinkTarget = await fs.readlink(destTargetPath);
+              } else {
+                errors.push(`${item.relPath}: ${statErr instanceof Error ? statErr.message : String(statErr)}`);
+                continue;
+              }
+            }
+          } else if (destLst.isDirectory()) {
+            errors.push(`${item.relPath}: destination '${destRelPath}' is a directory`);
+            continue;
+          } else {
+            destExisted = true;
+            if (!item.overwrite) {
+              errors.push(
+                `${item.relPath}: destination '${destRelPath}' already exists (set overwrite: true to replace it)`,
+              );
+              continue;
+            }
+            destOriginalMode = destLst.mode & 0o7777;
+            destOriginalBuffer = await fs.readFile(destTargetPath);
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+            errors.push(`${item.relPath}: ${err instanceof Error ? err.message : String(err)}`);
+            continue;
+          }
+        }
+      }
+
+      // Read source (text+hunks when hunks provided; raw Buffer for binary-safe pure moves)
+      if (item.hunks.length > 0) {
+        let fileData;
+        try {
+          fileData = await readTextFile(item.writeTargetPath);
+        } catch (err) {
+          errors.push(`${item.relPath}: ${err instanceof Error ? err.message : String(err)}`);
+          continue;
+        }
+        const normalizedOriginal = fileData.content.replace(/\r\n/g, "\n");
+        const planned = planHunksForContent(normalizedOriginal, item.hunks, item.relPath);
+        if (planned.errors.length > 0) {
+          errors.push(...planned.errors);
+          continue;
+        }
+        const finalContent =
+          fileData.eol === "\r\n"
+            ? planned.newNormalized.replace(/\n/g, "\r\n")
+            : planned.newNormalized;
+        const lineDelta = countLines(planned.newNormalized) - countLines(normalizedOriginal);
+        claimedDestinations.add(destKey);
+        plans.push({
+          kind: "move",
+          absPath: item.absPath,
+          writeTargetPath: item.writeTargetPath,
+          relPath: item.relPath,
+          existed: true,
+          originalBuffer: fileData.rawBuffer,
+          originalMode: fileData.mode,
+          newContent: finalContent,
+          hunkCount: planned.appliedMatches,
+          lineDelta,
+          created: false,
+          destAbsPath,
+          destTargetPath,
+          destRelPath,
+          destExisted,
+          destOriginalBuffer,
+          destOriginalMode,
+          destOriginalSymlinkTarget,
+          isCaseOnlyRename,
+        });
+      } else {
+        let originalBuffer: Buffer;
+        let originalMode: number | null = null;
+        try {
+          const st = await fs.stat(item.writeTargetPath);
+          if (st.isDirectory()) {
+            errors.push(`${item.relPath}: cannot move a directory`);
+            continue;
+          }
+          originalMode = st.mode & 0o7777;
+          originalBuffer = await fs.readFile(item.writeTargetPath);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+            errors.push(`${item.relPath}: file does not exist`);
+          } else {
+            errors.push(`${item.relPath}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          continue;
+        }
+        claimedDestinations.add(destKey);
+        plans.push({
+          kind: "move",
+          absPath: item.absPath,
+          writeTargetPath: item.writeTargetPath,
+          relPath: item.relPath,
+          existed: true,
+          originalBuffer,
+          originalMode,
+          newContent: originalBuffer,
+          hunkCount: 0,
+          lineDelta: 0,
+          created: false,
+          destAbsPath,
+          destTargetPath,
+          destRelPath,
+          destExisted,
+          destOriginalBuffer,
+          destOriginalMode,
+          destOriginalSymlinkTarget,
+          isCaseOnlyRename,
+        });
+      }
+      continue;
+    }
+
+    // 3. Create / overwrite file
     if (item.create !== undefined) {
       let exists = false;
       let originalBuffer: Buffer | null = null;
@@ -822,6 +1214,7 @@ export async function runApplyEdits(
       const oldLines = originalBuffer ? countLines(originalBuffer.toString("utf8")) : 0;
       const newLines = countLines(item.create);
       plans.push({
+        kind: "write",
         absPath: item.absPath,
         writeTargetPath: item.writeTargetPath,
         relPath: item.relPath,
@@ -837,7 +1230,7 @@ export async function runApplyEdits(
       continue;
     }
 
-    // Existing file hunks
+    // 4. Existing file hunks
     let fileData;
     try {
       fileData = await readTextFile(item.writeTargetPath);
@@ -864,6 +1257,7 @@ export async function runApplyEdits(
       countLines(planned.newNormalized) - countLines(normalizedOriginal);
 
     plans.push({
+      kind: "write",
       absPath: item.absPath,
       writeTargetPath: item.writeTargetPath,
       relPath: item.relPath,
@@ -905,6 +1299,16 @@ export async function runApplyEdits(
   }
 
   const summaryLines = plans.map((p) => {
+    if (p.kind === "delete") {
+      return `- ${p.relPath}: deleted`;
+    }
+    if (p.kind === "move") {
+      if (p.hunkCount > 0) {
+        const deltaStr = p.lineDelta >= 0 ? `+${p.lineDelta}` : `${p.lineDelta}`;
+        return `- ${p.relPath} -> ${p.destRelPath}: moved & updated (${p.hunkCount} match${p.hunkCount === 1 ? "" : "es"}), lines ${deltaStr}`;
+      }
+      return `- ${p.relPath} -> ${p.destRelPath}: moved`;
+    }
     const deltaStr = p.lineDelta >= 0 ? `+${p.lineDelta}` : `${p.lineDelta}`;
     const action = p.created
       ? "created"
