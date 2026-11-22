@@ -1,15 +1,15 @@
 {
   "name": "agy-fast",
-  "displayName": "agy-fast",
-  "version": "0.2.10",
-  "description": "Reduce Antigravity task latency with batched search, atomic multi-hunk edits, symbol-aware slice reading, concurrent checks, and fast session snapshots.",
+  "displayName": "agy-fast (NyeowsZ)",
+  "version": "0.3.0",
+  "description": "Reduce Antigravity task latency with batched search (including def/refs), atomic multi-hunk/move/delete edits, symbol-aware slice reading, concurrent checks, and fast session snapshots.",
   "logo": "assets/logo.svg",
   "author": {
-    "name": "inkwhite",
-    "url": "https://github.com/INK-Q"
+    "name": "NyeowsZ",
+    "url": "https://github.com/NyeowsZ"
   },
-  "homepage": "https://github.com/INK-Q/agy-fast",
-  "repository": "https://github.com/INK-Q/agy-fast",
+  "homepage": "https://github.com/NyeowsZ/agy-fast",
+  "repository": "https://github.com/NyeowsZ/agy-fast",
   "license": "MIT",
   "keywords": [
     "performance",

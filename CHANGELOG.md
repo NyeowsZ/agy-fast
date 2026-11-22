@@ -5,6 +5,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ---
 
+## [0.3.0] - 2026-11-23
+
+### Added
+
+- **Symbol-aware `type: "def"` and `type: "refs"` in `batch_search`**
+  - `type: "def"` runs a declaration-anchored `rg` / Node pre-filter followed by `extractSymbols()` verification to return only main source definitions with exact `Lstart-Lend [kind] Symbol` spans (supporting bare and qualified `Class.method` names and ranking non-test source files ahead of test/mock helpers).
+  - `type: "refs"` searches `\b<name>\b`, **preserves `import`/`export` lines**, skips pure comment lines and definition start lines, and annotates usages with deduplicated enclosing caller spans (`[in caller Lstart-Lend]`), falling back gracefully to raw matches past the 15-file / 250 KB cap.
+  - Both modes share a per-batch symbol cache so `def` + `refs` run together in one `batch_search` call.
+- **Atomic `delete` and `moveTo` in `apply_edits`**
+  - Added `delete?: boolean` and `moveTo?: string` on `FileEdit` entries, with full Phase 1 validation and Phase 2 rollback.
+  - `moveTo` can combine atomically with `hunks` (move + update imports in one call) and `overwrite?: boolean`, preserves binary safety on pure moves, and handles Windows/macOS case-only renames via a 2-step temp hop.
+
+### Changed
+
+- **Fork identity & auto-update repository**: Set `displayName` to `agy-fast (NyeowsZ)` (keeping plugin ID `agy-fast` for drop-in compatibility) and pointed default auto-update & installer URLs to `https://github.com/NyeowsZ/agy-fast.git`.
+- **Routing rules**: Updated `rules/AGENTS.md` routing table and Quick Schemas with `def`/`refs` and `delete`/`moveTo`.
+
+### Fixed
+
+- **Windows test suite stability**: Resolved 8 Windows-specific test and snapshot scan timing/symlink/temp-path assertions (`npm test` passing 117/117).
+
+---
+
 ## [0.2.10] - 2026-11-22
 
 ### Fixed

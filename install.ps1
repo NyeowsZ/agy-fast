@@ -5,7 +5,7 @@
 #   .\install.ps1 doctor
 #   .\install.ps1 uninstall
 # Remote usage:
-#   irm https://raw.githubusercontent.com/INK-Q/agy-fast/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/NyeowsZ/agy-fast/main/install.ps1 | iex
 
 $__agyFastScriptPath = ""
 if ($null -ne $MyInvocation.MyCommand -and $null -ne $MyInvocation.MyCommand.PSObject.Properties["Path"]) {
@@ -33,7 +33,7 @@ $__agyFastState = @{ ExitCode = 0 }
   )
 
   $ErrorActionPreference = "Stop"
-  $defaultRepo = "https://github.com/INK-Q/agy-fast.git"
+  $defaultRepo = "https://github.com/NyeowsZ/agy-fast.git"
 
   if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     Write-Error "Node.js >= 20 is required. Install Node.js first: https://nodejs.org/"

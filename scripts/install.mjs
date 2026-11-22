@@ -1280,7 +1280,7 @@ async function runConfig(opts) {
     console.log(`  - autoUpdate        : ${cfg.autoUpdate || "auto"}`);
     console.log(`  - checkIntervalHours: ${cfg.checkIntervalHours || 4}`);
     console.log(`  - channel           : ${cfg.channel || "release"}`);
-    console.log(`  - repoUrl           : ${cfg.repoUrl || "https://github.com/INK-Q/agy-fast.git"}`);
+    console.log(`  - repoUrl           : ${cfg.repoUrl || "https://github.com/NyeowsZ/agy-fast.git"}`);
     console.log(`  - editsFormat       : ${cfg.editsFormat || "auto"}`);
     console.log(`  - toolLoading       : ${cfg.toolLoading || "eager"}`);
     if (appliedToolLoadingNote) {

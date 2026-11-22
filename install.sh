@@ -8,10 +8,10 @@ set -eu
 #   ./install.sh doctor
 #   ./install.sh uninstall
 # Remote usage:
-#   curl -fsSL https://raw.githubusercontent.com/INK-Q/agy-fast/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/NyeowsZ/agy-fast/main/install.sh | sh
 
 PLUGIN_NAME="agy-fast"
-DEFAULT_REPO="https://github.com/INK-Q/agy-fast.git"
+DEFAULT_REPO="https://github.com/NyeowsZ/agy-fast.git"
 DEFAULT_TARGET="${HOME}/.gemini/config/plugins/${PLUGIN_NAME}"
 
 if ! command -v node >/dev/null 2>&1; then

@@ -1,13 +1,13 @@
 {
   "name": "agy-fast",
-  "version": "0.2.10",
+  "version": "0.3.0",
   "description": "Policy-compliant latency and tool-call accelerator plugin for Google Antigravity",
   "type": "module",
-  "author": "inkwhite <714395048@qq.com>",
-  "homepage": "https://github.com/INK-Q/agy-fast#readme",
+  "author": "NyeowsZ (fork of inkwhite/agy-fast)",
+  "homepage": "https://github.com/NyeowsZ/agy-fast#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/INK-Q/agy-fast.git"
+    "url": "https://github.com/NyeowsZ/agy-fast.git"
   },
   "license": "MIT",
   "engines": {
