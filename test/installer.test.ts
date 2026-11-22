@@ -39,7 +39,7 @@ describe("installer", () => {
 
   it("installs, runs doctor, upgrades idempotently, and uninstalls cleanly in isolated HOME", async () => {
     const env = makeIsolatedEnv(fakeHome);
-    const expectedDir = path.join(fakeHome, ".gemini", "config", "plugins", "agy-fast");
+    const expectedDir = path.join(fakeHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
 
     const out1 = execFileSync(
       process.execPath,
@@ -142,7 +142,7 @@ describe("installer", () => {
 
   it("supports --project and --link modes and valid shell syntax in install.sh", async () => {
     const env = makeIsolatedEnv(fakeHome);
-    const projectTarget = path.join(fakeProject, ".agents", "plugins", "agy-fast");
+    const projectTarget = path.join(fakeProject, ".agents", "plugins", "agy-fast-nyeowsz");
 
     execFileSync(
       process.execPath,
@@ -195,7 +195,7 @@ describe("installer", () => {
         });
         assert.match(unOut, /Nothing to remove/);
         await assert.rejects(
-          fs.stat(path.join(cleanHome, ".gemini", "config", "plugins", "agy-fast")),
+          fs.stat(path.join(cleanHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz")),
         );
       } finally {
         await fs.rm(cleanHome, { recursive: true, force: true });
@@ -280,7 +280,7 @@ describe("installer", () => {
       const nestedRepo = path.join(ancestorDir, "nested-repo");
       run([INSTALL_SCRIPT, "install", "--target", nestedRepo, "--no-enable"]);
       await fs.mkdir(path.join(nestedRepo, "src"), { recursive: true });
-      await fs.writeFile(path.join(ancestorDir, "plugin.json"), JSON.stringify({ name: "agy-fast" }), "utf8");
+      await fs.writeFile(path.join(ancestorDir, "plugin.json"), JSON.stringify({ name: "agy-fast-nyeowsz" }), "utf8");
       const nestedInstaller = path.join(nestedRepo, "scripts", "install.mjs");
       expectFail([nestedInstaller, "install", "--target", ancestorDir, "--no-enable"], /ancestor directory/);
       expectFail([nestedInstaller, "install", "--target", ancestorDir, "--link", "--no-enable"], /ancestor directory/);
@@ -380,9 +380,9 @@ describe("installer", () => {
       await fs.mkdir(path.join(customGeminiHome, "config"), { recursive: true });
 
       const env = makeIsolatedEnv(acpHome, { GEMINI_HOME: customGeminiHome });
-      const primaryDir = path.join(acpHome, ".gemini", "config", "plugins", "agy-fast");
-      const t3PluginDir = path.join(t3ProfileRoot, "config", "plugins", "agy-fast");
-      const envPluginDir = path.join(customGeminiHome, "config", "plugins", "agy-fast");
+      const primaryDir = path.join(acpHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
+      const t3PluginDir = path.join(t3ProfileRoot, "config", "plugins", "agy-fast-nyeowsz");
+      const envPluginDir = path.join(customGeminiHome, "config", "plugins", "agy-fast-nyeowsz");
 
       // 1. Global install automatically syncs both T3 Code ACP profile and isolated GEMINI_HOME
       const out = execFileSync(process.execPath, [INSTALL_SCRIPT, "install", "--no-enable"], {
@@ -470,8 +470,8 @@ describe("installer", () => {
       await fs.symlink(realHome, linkHome, process.platform === "win32" ? "junction" : "dir");
 
       const aliasEnv = makeIsolatedEnv(linkHome, { GEMINI_HOME: realGemini });
-      const primaryViaLink = path.join(linkHome, ".gemini", "config", "plugins", "agy-fast");
-      const primaryViaReal = path.join(realGemini, "config", "plugins", "agy-fast");
+      const primaryViaLink = path.join(linkHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
+      const primaryViaReal = path.join(realGemini, "config", "plugins", "agy-fast-nyeowsz");
 
       // 1. Copied global install: GEMINI_HOME aliases ~/.gemini -> must NOT delete primary or create self-loop
       const copyOut = execFileSync(process.execPath, [INSTALL_SCRIPT, "install", "--no-enable"], {
@@ -499,7 +499,7 @@ describe("installer", () => {
 
       // 3. Separate GEMINI_HOME alongside symlinked $HOME still syncs and uninstalls normally
       const sepEnv = makeIsolatedEnv(linkHome, { GEMINI_HOME: separateGemini });
-      const sepPluginDir = path.join(separateGemini, "config", "plugins", "agy-fast");
+      const sepPluginDir = path.join(separateGemini, "config", "plugins", "agy-fast-nyeowsz");
       const sepOut = execFileSync(process.execPath, [INSTALL_SCRIPT, "install", "--no-enable"], {
         env: sepEnv,
         encoding: "utf8",
@@ -523,7 +523,7 @@ describe("installer", () => {
     const externalSecret = path.join(localRulesHome, "outside-secret.txt");
     try {
       const env = makeIsolatedEnv(localRulesHome);
-      const pluginDir = path.join(localRulesHome, ".gemini", "config", "plugins", "agy-fast");
+      const pluginDir = path.join(localRulesHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
       await fs.writeFile(externalSecret, "do-not-copy", "utf8");
 
       // Initial install
@@ -571,9 +571,9 @@ describe("installer", () => {
 
       // Migrating an existing copied isolated GEMINI_HOME profile to symlink preserves its unique rules/*.local.md into primary
       const isoGemini = path.join(localRulesHome, "custom-gemini");
-      const isoPluginDir = path.join(isoGemini, "config", "plugins", "agy-fast");
+      const isoPluginDir = path.join(isoGemini, "config", "plugins", "agy-fast-nyeowsz");
       await fs.mkdir(path.join(isoPluginDir, "rules"), { recursive: true });
-      await fs.writeFile(path.join(isoPluginDir, "plugin.json"), '{"name":"agy-fast","version":"0.2.8"}\n', "utf8");
+      await fs.writeFile(path.join(isoPluginDir, "plugin.json"), '{"name":"agy-fast-nyeowsz","version":"0.2.8"}\n', "utf8");
       await fs.writeFile(
         path.join(isoPluginDir, "rules", "iso-extra.local.md"),
         "---\ntrigger: always_on\n---\n# Isolated rule\n",
@@ -628,10 +628,10 @@ describe("installer", () => {
         HOME: modeHome,
         USERPROFILE: modeHome,
         AGY_FAST_AUTO_UPDATE: "off",
-        AGY_FAST_CACHE_DIR: path.join(modeHome, ".gemini", "cache", "agy-fast"),
+        AGY_FAST_CACHE_DIR: path.join(modeHome, ".gemini", "cache", "agy-fast-nyeowsz"),
       };
       delete env.AGY_FAST_TOOL_LOADING;
-      const pluginDir = path.join(modeHome, ".gemini", "config", "plugins", "agy-fast");
+      const pluginDir = path.join(modeHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
       const mcpConfigPath = path.join(pluginDir, "mcp_config.json");
 
       // 1. Install with --tool-loading lazy strips eager declarations while passing doctor & agy validate

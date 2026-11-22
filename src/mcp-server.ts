@@ -280,7 +280,7 @@ export function createAgyFastServer(
   };
 
   const server = new McpStdioServer({
-    name: "agy-fast",
+    name: "agy-fast-nyeowsz",
     version: SERVER_VERSION,
     onInitialize: ({ clientInfo }) => {
       hostCompat = resolveHostCompat({

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execBinaryAsync } from "./exec-utils.js";
 
+export const PLUGIN_NAME = "agy-fast-nyeowsz";
 export const DEFAULT_REPO_URL = "https://github.com/NyeowsZ/agy-fast.git";
 export const DEFAULT_GITHUB_SLUG = "NyeowsZ/agy-fast";
 export const DEFAULT_CHECK_INTERVAL_HOURS = 4;
@@ -134,7 +135,7 @@ export function getUpdaterPaths(env: NodeJS.ProcessEnv = process.env): UpdaterPa
   const custom = env.AGY_FAST_CACHE_DIR?.trim();
   const cacheDir = custom
     ? path.resolve(custom)
-    : path.join(getHomeDir(env), ".gemini", "cache", "agy-fast");
+    : path.join(getHomeDir(env), ".gemini", "cache", PLUGIN_NAME);
   return {
     cacheDir,
     stateFile: path.join(cacheDir, "update-state.json"),
@@ -447,7 +448,7 @@ export async function detectInstallKind(pluginDir: string): Promise<InstallKind>
     // a standalone source repo outside plugins/ is treated as a developer workspace.
     const norm = resolved.split(path.sep).join("/").toLowerCase();
     const isPluginInstallDir =
-      norm.endsWith("/plugins/agy-fast") || norm.includes("/plugins/agy-fast/");
+      norm.endsWith(`/plugins/${PLUGIN_NAME}`) || norm.includes(`/plugins/${PLUGIN_NAME}/`);
     if (!isPluginInstallDir) {
       return "dev-source";
     }
@@ -566,7 +567,7 @@ export async function verifyStagedPlugin(stagingDir: string): Promise<{
   );
   if (
     !manifest ||
-    manifest.name !== "agy-fast" ||
+    manifest.name !== PLUGIN_NAME ||
     typeof manifest.version !== "string" ||
     !parseSemver(manifest.version)
   ) {

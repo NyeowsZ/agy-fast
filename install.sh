@@ -10,7 +10,7 @@ set -eu
 # Remote usage:
 #   curl -fsSL https://raw.githubusercontent.com/NyeowsZ/agy-fast/main/install.sh | sh
 
-PLUGIN_NAME="agy-fast"
+PLUGIN_NAME="agy-fast-nyeowsz"
 DEFAULT_REPO="https://github.com/NyeowsZ/agy-fast.git"
 DEFAULT_TARGET="${HOME}/.gemini/config/plugins/${PLUGIN_NAME}"
 

@@ -141,8 +141,8 @@ describe("auto-updater", () => {
 
   it("auto-updates a copied install atomically, emits one-shot SessionStart notice, and respects notify/off modes", async () => {
     const fakeHome = path.join(rootTmp, "home-copied");
-    const pluginDir = path.join(fakeHome, ".gemini", "config", "plugins", "agy-fast");
-    const cacheDir = path.join(fakeHome, ".gemini", "cache", "agy-fast");
+    const pluginDir = path.join(fakeHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
+    const cacheDir = path.join(fakeHome, ".gemini", "cache", "agy-fast-nyeowsz");
     await copyRuntimeFixture(pluginDir, "0.2.0", "release-0.2.0");
 
     const envBase: NodeJS.ProcessEnv = {
@@ -223,7 +223,7 @@ describe("auto-updater", () => {
 
   it("protects symlinks, dirty git clones, concurrent locks, and rejects broken staged releases", async () => {
     const fakeHome = path.join(rootTmp, "home-guards");
-    const cacheDir = path.join(fakeHome, ".gemini", "cache", "agy-fast");
+    const cacheDir = path.join(fakeHome, ".gemini", "cache", "agy-fast-nyeowsz");
     const envBase: NodeJS.ProcessEnv = {
       ...process.env,
       HOME: fakeHome,
@@ -236,7 +236,7 @@ describe("auto-updater", () => {
     // 1. Symlink install is never overwritten
     const realTarget = path.join(rootTmp, "dev-real");
     await copyRuntimeFixture(realTarget, "0.2.0", "dev-0.2.0");
-    const linkDir = path.join(fakeHome, ".gemini", "config", "plugins", "agy-fast");
+    const linkDir = path.join(fakeHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
     await fs.mkdir(path.dirname(linkDir), { recursive: true });
     await fs.symlink(realTarget, linkDir, process.platform === "win32" ? "junction" : "dir");
     const linkRes = await runPluginUpdate({ pluginDir: linkDir, background: true, env: envBase });
@@ -246,14 +246,14 @@ describe("auto-updater", () => {
 
     // 2. Clean git-clone inside plugins/agy-fast auto-updates cleanly; dirty clone is protected
     const cloneHome = path.join(rootTmp, "home-gitclone");
-    const cloneDir = path.join(cloneHome, ".gemini", "config", "plugins", "agy-fast");
+    const cloneDir = path.join(cloneHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
     await fs.mkdir(path.dirname(cloneDir), { recursive: true });
     git(path.dirname(cloneDir), ["clone", "--branch", "v0.2.0", originRepoUrl, cloneDir]);
     const cloneEnv: NodeJS.ProcessEnv = {
       ...envBase,
       HOME: cloneHome,
       USERPROFILE: cloneHome,
-      AGY_FAST_CACHE_DIR: path.join(cloneHome, ".gemini", "cache", "agy-fast"),
+      AGY_FAST_CACHE_DIR: path.join(cloneHome, ".gemini", "cache", "agy-fast-nyeowsz"),
     };
 
     // Dirty tree -> notify only
@@ -316,8 +316,8 @@ describe("auto-updater", () => {
 
   it("supports 'scripts/install.mjs config' and 'scripts/install.mjs update --check / update'", async () => {
     const cliHome = path.join(rootTmp, "home-cli");
-    const pluginDir = path.join(cliHome, ".gemini", "config", "plugins", "agy-fast");
-    const cacheDir = path.join(cliHome, ".gemini", "cache", "agy-fast");
+    const pluginDir = path.join(cliHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
+    const cacheDir = path.join(cliHome, ".gemini", "cache", "agy-fast-nyeowsz");
     await copyRuntimeFixture(pluginDir, "0.2.0", "release-0.2.0");
 
     const env: NodeJS.ProcessEnv = {
@@ -348,7 +348,7 @@ describe("auto-updater", () => {
     // Global update (without --target) also syncs any discovered T3 Code ACP profile
     const t3ProfileRoot = path.join(cliHome, ".t3", "userdata", "providers", "antigravity", "abcd1234");
     await fs.mkdir(path.join(t3ProfileRoot, "config"), { recursive: true });
-    const t3PluginDir = path.join(t3ProfileRoot, "config", "plugins", "agy-fast");
+    const t3PluginDir = path.join(t3ProfileRoot, "config", "plugins", "agy-fast-nyeowsz");
 
     const applyOut = execFileSync(
       process.execPath,
@@ -379,7 +379,7 @@ describe("auto-updater", () => {
     git(untaggedWork, ["commit", "-m", "main v0.2.0"]);
     git(untaggedWork, ["push", "origin", "main"]);
 
-    const downgradePlugin = path.join(rootTmp, "downgrade-guard", "plugins", "agy-fast");
+    const downgradePlugin = path.join(rootTmp, "downgrade-guard", "plugins", "agy-fast-nyeowsz");
     await copyRuntimeFixture(downgradePlugin, "0.3.0", "installed-0.3.0");
     const dgRes = await runPluginUpdate({
       pluginDir: downgradePlugin,
@@ -391,7 +391,7 @@ describe("auto-updater", () => {
     assert.equal(await readInstalledVersion(downgradePlugin), "0.3.0");
     assert.match(await fs.readFile(path.join(downgradePlugin, "rules", "AGENTS.md"), "utf8"), /marker:installed-0\.3\.0/);
 
-    const sameVerPlugin = path.join(rootTmp, "samever-guard", "plugins", "agy-fast");
+    const sameVerPlugin = path.join(rootTmp, "samever-guard", "plugins", "agy-fast-nyeowsz");
     await copyRuntimeFixture(sameVerPlugin, "0.2.0", "installed-0.2.0");
     const svRes = await runPluginUpdate({
       pluginDir: sameVerPlugin,
@@ -439,7 +439,7 @@ describe("auto-updater", () => {
     assert.equal((await fs.readdir(path.join(partialPlugin, "dist"))).some((n) => n.includes(".agy-tmp.")), false);
 
     // 3. git-clone honors --repo override (fetching from verified stagingDir even if origin is broken)
-    const overrideCloneDir = path.join(rootTmp, "override-home", ".gemini", "config", "plugins", "agy-fast");
+    const overrideCloneDir = path.join(rootTmp, "override-home", ".gemini", "config", "plugins", "agy-fast-nyeowsz");
     await fs.mkdir(path.dirname(overrideCloneDir), { recursive: true });
     git(path.dirname(overrideCloneDir), ["clone", "--branch", "v0.2.0", originRepoUrl, overrideCloneDir]);
     git(overrideCloneDir, ["remote", "set-url", "origin", "file:///nonexistent-agy-fast-origin.git"]);
@@ -501,7 +501,7 @@ describe("auto-updater", () => {
       "---\ntrigger: always_on\n---\n# Personal local rule\n",
     );
 
-    const localGitDir = path.join(rootTmp, "local-git-home", ".gemini", "config", "plugins", "agy-fast");
+    const localGitDir = path.join(rootTmp, "local-git-home", ".gemini", "config", "plugins", "agy-fast-nyeowsz");
     await fs.mkdir(path.dirname(localGitDir), { recursive: true });
     git(path.dirname(localGitDir), ["clone", "--branch", "v0.2.0", originRepoUrl, localGitDir]);
     await fs.writeFile(

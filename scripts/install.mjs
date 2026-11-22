@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const PLUGIN_NAME = "agy-fast";
+const PLUGIN_NAME = "agy-fast-nyeowsz";
 const EXPECTED_MCP_TOOLS = [
   "batch_search",
   "apply_edits",
@@ -244,10 +244,10 @@ Commands:
   doctor       Alias for status
 
 Options:
-  --project [dir]               Install/update <dir>/.agents/plugins/agy-fast
+  --project [dir]               Install/update <dir>/.agents/plugins/agy-fast-nyeowsz
   --target <dir>                Use a custom plugin directory
   --link                        Create a symlink to this repository (dev mode)
-  --no-enable                   Skip running 'agy plugin enable agy-fast'
+  --no-enable                   Skip running 'agy plugin enable agy-fast-nyeowsz'
   --no-acp                      Skip syncing isolated T3 Code ACP / GEMINI_HOME profiles
   --check                       (update) Check for newer versions without applying
   --force                       (update) Re-apply even if already on the same version
@@ -1229,7 +1229,7 @@ async function runInstall(opts) {
     console.log("");
     console.log("Installation complete. Next steps:");
     console.log("  - Antigravity CLI (agy)    : Start a new session to activate agy-fast.");
-    console.log("  - Antigravity Desktop / IDE: Open Customizations -> Installed and ensure 'agy-fast' is enabled.");
+    console.log("  - Antigravity Desktop / IDE: Open Customizations -> Installed and ensure 'agy-fast-nyeowsz' is enabled.");
     if (isolatedTargets.length > 0) {
       console.log(
         `  - T3 Code / ACP (${isolatedTargets.length})        : Start a new thread (or reload provider) to activate agy-fast.`,

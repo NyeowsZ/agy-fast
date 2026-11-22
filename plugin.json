@@ -1,5 +1,5 @@
 {
-  "name": "agy-fast",
+  "name": "agy-fast-nyeowsz",
   "displayName": "agy-fast (NyeowsZ)",
   "version": "0.3.0",
   "description": "Reduce Antigravity task latency with batched search (including def/refs), atomic multi-hunk/move/delete edits, symbol-aware slice reading, concurrent checks, and fast session snapshots.",
