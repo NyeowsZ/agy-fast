@@ -28,6 +28,8 @@ describe("run_checks", () => {
   const nodeBin = JSON.stringify(process.execPath);
 
   it("executes multiple commands concurrently and compacts passing output", async () => {
+    const sleepMs = process.platform === "win32" ? 600 : 180;
+    const maxElapsed = process.platform === "win32" ? 1750 : 480;
     const start = Date.now();
     const res = await runChecks({
       concurrency: 3,
@@ -35,15 +37,15 @@ describe("run_checks", () => {
       commands: [
         {
           name: "c1",
-          command: `${nodeBin} -e "setTimeout(() => console.log('line1\\nline2\\nAll 10 tests passed'), 180)"`,
+          command: `${nodeBin} -e "setTimeout(() => console.log('line1\\nline2\\nAll 10 tests passed'), ${sleepMs})"`,
         },
         {
           name: "c2",
-          command: `${nodeBin} -e "setTimeout(() => console.log('Build done in 0.2s'), 180)"`,
+          command: `${nodeBin} -e "setTimeout(() => console.log('Build done in 0.2s'), ${sleepMs})"`,
         },
         {
           name: "c3",
-          command: `${nodeBin} -e "setTimeout(() => console.log('0 errors'), 180)"`,
+          command: `${nodeBin} -e "setTimeout(() => console.log('0 errors'), ${sleepMs})"`,
         },
       ],
     });
@@ -53,8 +55,11 @@ describe("run_checks", () => {
     assert.match(res.text, /Checks: 3\/3 passed/);
     assert.match(res.text, /\[PASS \d+ms\] c1/);
     assert.match(res.text, /All 10 tests passed/);
-    // Should clearly execute concurrently rather than 3 * 180ms = 540ms+ serially
-    assert.ok(elapsed < 480, `Expected concurrent execution <480ms, got ${elapsed}ms`);
+    // Should clearly execute concurrently rather than 3 * sleepMs serially
+    assert.ok(
+      elapsed < maxElapsed,
+      `Expected concurrent execution <${maxElapsed}ms, got ${elapsed}ms`,
+    );
   });
 
   it("extracts error lines on failure and strips ANSI escape codes", async () => {

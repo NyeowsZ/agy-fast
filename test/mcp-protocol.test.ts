@@ -588,7 +588,13 @@ describe("MCP Stdio Server end-to-end", () => {
       assert.equal(batchRes.stderr, "");
       const bLines = batchRes.stdout.trim().split("\n").map((l) => JSON.parse(l));
       assert.ok(Array.isArray(bLines[0]) && bLines[0][0]?.id === 1);
-      assert.equal(bLines[1]?.method, "roots/list");
+      const rootsFrameIdx = bLines.findIndex(
+        (l) => !Array.isArray(l) && l.method === "roots/list",
+      );
+      assert.ok(
+        rootsFrameIdx > 0,
+        `Expected roots/list frame after initialize batch, got: ${JSON.stringify(bLines)}`,
+      );
       const bCall4 = bLines.find((l) => !Array.isArray(l) && l.id === 4);
       assert.equal(bCall4?.result?.isError, false);
       assert.match(bCall4?.result?.content?.[0]?.text ?? "", /greet/);

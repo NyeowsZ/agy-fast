@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -160,41 +160,46 @@ describe("installer", () => {
     assert.ok((await fs.lstat(linkTarget)).isSymbolicLink());
 
     // Shell syntax check and local invocation via install.sh (install, doctor, uninstall)
-    execFileSync("sh", ["-n", INSTALL_SH], { encoding: "utf8" });
-    const shTarget = path.join(fakeHome, "sh-installed-agy-fast");
-    const shOut = execFileSync("sh", [INSTALL_SH, "--target", shTarget, "--no-enable"], {
-      env,
-      encoding: "utf8",
-    });
-    assert.match(shOut, /Installation complete/);
-
-    // Subcommands forwarded cleanly via install.sh (doctor & uninstall must NOT install!)
-    const shDoc = execFileSync("sh", [INSTALL_SH, "doctor", "--target", shTarget], {
-      env,
-      encoding: "utf8",
-    });
-    assert.match(shDoc, /MCP server\s+: OK/);
-
-    const shUn = execFileSync("sh", [INSTALL_SH, "uninstall", "--target", shTarget], {
-      env,
-      encoding: "utf8",
-    });
-    assert.match(shUn, /Removed agy-fast/);
-    await assert.rejects(fs.stat(shTarget));
-
-    // Uninstall via install.sh on clean HOME must NOT accidentally install
-    const cleanHome = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-clean-"));
-    try {
-      const unOut = execFileSync("sh", [INSTALL_SH, "uninstall", "--no-enable"], {
-        env: makeIsolatedEnv(cleanHome),
+    const hasSh =
+      process.platform !== "win32" ||
+      spawnSync("sh", ["-c", "exit 0"], { stdio: "ignore" }).error === undefined;
+    if (hasSh) {
+      execFileSync("sh", ["-n", INSTALL_SH], { encoding: "utf8" });
+      const shTarget = path.join(fakeHome, "sh-installed-agy-fast");
+      const shOut = execFileSync("sh", [INSTALL_SH, "--target", shTarget, "--no-enable"], {
+        env,
         encoding: "utf8",
       });
-      assert.match(unOut, /Nothing to remove/);
-      await assert.rejects(
-        fs.stat(path.join(cleanHome, ".gemini", "config", "plugins", "agy-fast")),
-      );
-    } finally {
-      await fs.rm(cleanHome, { recursive: true, force: true });
+      assert.match(shOut, /Installation complete/);
+
+      // Subcommands forwarded cleanly via install.sh (doctor & uninstall must NOT install!)
+      const shDoc = execFileSync("sh", [INSTALL_SH, "doctor", "--target", shTarget], {
+        env,
+        encoding: "utf8",
+      });
+      assert.match(shDoc, /MCP server\s+: OK/);
+
+      const shUn = execFileSync("sh", [INSTALL_SH, "uninstall", "--target", shTarget], {
+        env,
+        encoding: "utf8",
+      });
+      assert.match(shUn, /Removed agy-fast/);
+      await assert.rejects(fs.stat(shTarget));
+
+      // Uninstall via install.sh on clean HOME must NOT accidentally install
+      const cleanHome = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-clean-"));
+      try {
+        const unOut = execFileSync("sh", [INSTALL_SH, "uninstall", "--no-enable"], {
+          env: makeIsolatedEnv(cleanHome),
+          encoding: "utf8",
+        });
+        assert.match(unOut, /Nothing to remove/);
+        await assert.rejects(
+          fs.stat(path.join(cleanHome, ".gemini", "config", "plugins", "agy-fast")),
+        );
+      } finally {
+        await fs.rm(cleanHome, { recursive: true, force: true });
+      }
     }
 
     // Missing --target value must fail with a clear error

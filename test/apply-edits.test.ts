@@ -260,13 +260,24 @@ describe("apply_edits", () => {
     const realFile = path.join(tmpDir, "real-target.txt");
     const symFile = path.join(tmpDir, "sym-link.txt");
     await fs.writeFile(realFile, "hello link\n", "utf8");
-    await fs.symlink(realFile, symFile);
+    let canSymlink = true;
+    try {
+      await fs.symlink(realFile, symFile);
+    } catch (err) {
+      if (process.platform === "win32" && (err as NodeJS.ErrnoException)?.code === "EPERM") {
+        canSymlink = false;
+      } else {
+        throw err;
+      }
+    }
 
     const editRes = await runApplyEdits({
       cwd: tmpDir,
       edits: [
         { path: "tool.sh", hunks: [{ target: "v1", replacement: "v2" }] },
-        { path: "sym-link.txt", hunks: [{ target: "hello", replacement: "updated" }] },
+        ...(canSymlink
+          ? [{ path: "sym-link.txt", hunks: [{ target: "hello", replacement: "updated" }] }]
+          : [{ path: "real-target.txt", hunks: [{ target: "hello", replacement: "updated" }] }]),
         { path: "real-target.txt", hunks: [{ target: "link", replacement: "target" }] },
         { path: "single-line.txt", create: "only one line\n" },
       ],
@@ -278,7 +289,9 @@ describe("apply_edits", () => {
     if (process.platform !== "win32") {
       assert.equal((await fs.stat(scriptPath)).mode & 0o777, 0o755);
     }
-    assert.equal((await fs.lstat(symFile)).isSymbolicLink(), true);
+    if (canSymlink) {
+      assert.equal((await fs.lstat(symFile)).isSymbolicLink(), true);
+    }
     assert.equal(await fs.readFile(realFile, "utf8"), "updated target\n");
 
     const badLine = await runApplyEdits({

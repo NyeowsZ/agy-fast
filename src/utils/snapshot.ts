@@ -6,7 +6,7 @@ import { execBinaryAsync } from "./exec-utils.js";
 import { DEFAULT_IGNORE_DIRS } from "./fs-utils.js";
 import { sliceSafeChars, sliceUtf8Bytes, truncateWithByteNotice } from "./output-filter.js";
 
-export const DEFAULT_SCAN_TIMEOUT_MS = 250;
+export const DEFAULT_SCAN_TIMEOUT_MS = process.platform === "win32" ? 600 : 250;
 
 export interface SnapshotOptions {
   maxChars?: number;

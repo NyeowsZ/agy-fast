@@ -654,7 +654,7 @@ var DEFAULT_IGNORE_DIRS = /* @__PURE__ */ new Set([
 ]);
 
 // src/utils/snapshot.ts
-var DEFAULT_SCAN_TIMEOUT_MS = 250;
+var DEFAULT_SCAN_TIMEOUT_MS = process.platform === "win32" ? 600 : 250;
 var HARDENED_GIT_BASE_ARGS = [
   "--no-optional-locks",
   "-c",
