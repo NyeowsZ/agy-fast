@@ -267,6 +267,7 @@ function spawnAndCollect(commandOrBin, args, shell, options) {
 }
 
 // src/utils/updater-core.ts
+var PLUGIN_NAME = "agy-fast-nyeowsz";
 var DEFAULT_REPO_URL = "https://github.com/NyeowsZ/agy-fast.git";
 var DEFAULT_CHECK_INTERVAL_HOURS = 4;
 var LOCK_STALE_MS = 10 * 60 * 1e3;
@@ -308,7 +309,7 @@ function getHomeDir(env = process.env) {
 }
 function getUpdaterPaths(env = process.env) {
   const custom = env.AGY_FAST_CACHE_DIR?.trim();
-  const cacheDir = custom ? path2.resolve(custom) : path2.join(getHomeDir(env), ".gemini", "cache", "agy-fast");
+  const cacheDir = custom ? path2.resolve(custom) : path2.join(getHomeDir(env), ".gemini", "cache", PLUGIN_NAME);
   return {
     cacheDir,
     stateFile: path2.join(cacheDir, "update-state.json"),
@@ -507,7 +508,7 @@ async function detectInstallKind(pluginDir) {
       return "git-dirty";
     }
     const norm = resolved.split(path2.sep).join("/").toLowerCase();
-    const isPluginInstallDir = norm.endsWith("/plugins/agy-fast") || norm.includes("/plugins/agy-fast/");
+    const isPluginInstallDir = norm.endsWith(`/plugins/${PLUGIN_NAME}`) || norm.includes(`/plugins/${PLUGIN_NAME}/`);
     if (!isPluginInstallDir) {
       return "dev-source";
     }
@@ -602,7 +603,7 @@ async function verifyStagedPlugin(stagingDir) {
   const manifest = await readJsonFile(
     path2.join(stagingDir, "plugin.json")
   );
-  if (!manifest || manifest.name !== "agy-fast" || typeof manifest.version !== "string" || !parseSemver(manifest.version)) {
+  if (!manifest || manifest.name !== PLUGIN_NAME || typeof manifest.version !== "string" || !parseSemver(manifest.version)) {
     return { ok: false, version: "0.0.0", reason: "Invalid staged plugin.json manifest" };
   }
   const mcpPath = path2.join(stagingDir, "dist", "mcp-server.mjs");

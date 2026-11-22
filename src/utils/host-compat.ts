@@ -478,7 +478,7 @@ function getConfigPath(env: NodeJS.ProcessEnv = process.env): string {
     process.platform === "win32"
       ? env.USERPROFILE || env.HOME || os.homedir()
       : env.HOME || env.USERPROFILE || os.homedir();
-  const cacheDir = custom ? path.resolve(custom) : path.join(home, ".gemini", "cache", "agy-fast");
+  const cacheDir = custom ? path.resolve(custom) : path.join(home, ".gemini", "cache", "agy-fast-nyeowsz");
   return path.join(cacheDir, "config.json");
 }
 

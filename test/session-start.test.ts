@@ -530,9 +530,9 @@ describe("session-start hook", () => {
     const hooksConfig = JSON.parse(
       await fs.readFile(path.resolve(process.cwd(), "hooks.json"), "utf8"),
     ) as {
-      "agy-fast-snapshot": { SessionStart: Array<{ command: string }> };
+      "agy-fast-nyeowsz-snapshot": { SessionStart: Array<{ command: string }> };
     };
-    const hookCmd = hooksConfig["agy-fast-snapshot"].SessionStart[0]!.command;
+    const hookCmd = hooksConfig["agy-fast-nyeowsz-snapshot"].SessionStart[0]!.command;
     // Must stay free of shell metacharacters that differ across sh -c and Windows cmd /c
     assert.doesNotMatch(hookCmd, /[$%!<>|&`\\]/);
 
@@ -585,8 +585,8 @@ describe("session-start hook", () => {
       const msg1: string = JSON.parse(withRoot.stdout)?.injectSteps?.[0]?.systemMessage?.systemMessage;
       assert.match(msg1, /unrelated-biz-app/);
 
-      // 2. Without PLUGIN_ROOT, falls back to ~/.gemini/config/plugins/agy-fast
-      const globalPlugin = path.join(fakeHome, ".gemini", "config", "plugins", "agy-fast");
+      // 2. Without PLUGIN_ROOT, falls back to ~/.gemini/config/plugins/agy-fast-nyeowsz
+      const globalPlugin = path.join(fakeHome, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
       await fs.mkdir(path.join(globalPlugin, "dist"), { recursive: true });
       await fs.copyFile(path.resolve(process.cwd(), "plugin.json"), path.join(globalPlugin, "plugin.json"));
       await fs.copyFile(HOOK_SCRIPT, path.join(globalPlugin, "dist", "session-start.mjs"));

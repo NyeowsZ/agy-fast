@@ -606,7 +606,7 @@ function formatSessionStartCompatNotice(compat) {
 function getConfigPath(env = process.env) {
   const custom = env.AGY_FAST_CACHE_DIR?.trim();
   const home = process.platform === "win32" ? env.USERPROFILE || env.HOME || os.homedir() : env.HOME || env.USERPROFILE || os.homedir();
-  const cacheDir = custom ? path2.resolve(custom) : path2.join(home, ".gemini", "cache", "agy-fast");
+  const cacheDir = custom ? path2.resolve(custom) : path2.join(home, ".gemini", "cache", "agy-fast-nyeowsz");
   return path2.join(cacheDir, "config.json");
 }
 async function readSavedEditsFormat(env = process.env) {
@@ -1361,6 +1361,7 @@ import { spawn as spawn2 } from "node:child_process";
 import { promises as fs2 } from "node:fs";
 import os3 from "node:os";
 import path4 from "node:path";
+var PLUGIN_NAME = "agy-fast-nyeowsz";
 var DEFAULT_REPO_URL = "https://github.com/NyeowsZ/agy-fast.git";
 var DEFAULT_CHECK_INTERVAL_HOURS = 4;
 var LOCK_STALE_MS = 10 * 60 * 1e3;
@@ -1369,7 +1370,7 @@ function getHomeDir(env = process.env) {
 }
 function getUpdaterPaths(env = process.env) {
   const custom = env.AGY_FAST_CACHE_DIR?.trim();
-  const cacheDir = custom ? path4.resolve(custom) : path4.join(getHomeDir(env), ".gemini", "cache", "agy-fast");
+  const cacheDir = custom ? path4.resolve(custom) : path4.join(getHomeDir(env), ".gemini", "cache", PLUGIN_NAME);
   return {
     cacheDir,
     stateFile: path4.join(cacheDir, "update-state.json"),

@@ -104,7 +104,7 @@ $__agyFastState = @{ ExitCode = 0 }
     return
   }
 
-  $defaultTarget = Join-Path $env:USERPROFILE ".gemini\config\plugins\agy-fast"
+  $defaultTarget = Join-Path $env:USERPROFILE ".gemini\config\plugins\agy-fast-nyeowsz"
   $installedInstaller = Join-Path $defaultTarget "scripts\install.mjs"
   if ($hasSubcmd -and ($InputArgs[0] -ne "install") -and (Test-Path $installedInstaller)) {
     Invoke-NodeInstaller -InstallerPath $installedInstaller -ForwardArgs $forwardArgs -RunState $State

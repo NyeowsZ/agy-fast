@@ -202,7 +202,7 @@ describe("MCP Stdio Server end-to-end", () => {
       serverInfo: { name: string };
     };
     assert.equal(init.protocolVersion, "2025-03-26");
-    assert.equal(init.serverInfo.name, "agy-fast");
+    assert.equal(init.serverInfo.name, "agy-fast-nyeowsz");
 
     assert.deepEqual(byId.get(2)?.result, {});
 
@@ -885,7 +885,7 @@ describe("MCP Stdio Server end-to-end", () => {
 
   it("refuses to silently fall back to PLUGIN_ROOT when cwd is omitted or relative without MCP roots/list (Issue #22)", async () => {
     const fakeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-hub-cwd-"));
-    const fakePluginDir = path.join(fakeRoot, ".gemini", "config", "plugins", "agy-fast");
+    const fakePluginDir = path.join(fakeRoot, ".gemini", "config", "plugins", "agy-fast-nyeowsz");
     const realWorkspace = path.join(fakeRoot, "real-workspace");
     try {
       await fs.mkdir(path.join(fakePluginDir, "dist"), { recursive: true });

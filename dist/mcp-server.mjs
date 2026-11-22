@@ -2267,7 +2267,7 @@ function resolveHostCompat(signals = {}, rules = HOST_COMPAT_RULES) {
 function getConfigPath(env = process.env) {
   const custom = env.AGY_FAST_CACHE_DIR?.trim();
   const home = process.platform === "win32" ? env.USERPROFILE || env.HOME || os.homedir() : env.HOME || env.USERPROFILE || os.homedir();
-  const cacheDir = custom ? path2.resolve(custom) : path2.join(home, ".gemini", "cache", "agy-fast");
+  const cacheDir = custom ? path2.resolve(custom) : path2.join(home, ".gemini", "cache", "agy-fast-nyeowsz");
   return path2.join(cacheDir, "config.json");
 }
 function readSavedEditsFormatSync(env = process.env) {
@@ -8815,7 +8815,7 @@ function createAgyFastServer(options = {}) {
     return { ok: true, value: { ...args, cwd: rawCwd } };
   };
   const server = new McpStdioServer({
-    name: "agy-fast",
+    name: "agy-fast-nyeowsz",
     version: SERVER_VERSION,
     onInitialize: ({ clientInfo }) => {
       hostCompat = resolveHostCompat({
