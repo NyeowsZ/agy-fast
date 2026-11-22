@@ -160,8 +160,8 @@ function buildApplyEditsToolDefinition(
   return {
     name: "apply_edits",
     description: preferStringEdits
-      ? "Atomically apply hunks, create, move, or delete files (all-or-nothing) with optional inline verify command. Pass 'edits' as one JSON array string."
-      : "Atomically apply hunks, create, move, or delete files (all-or-nothing) with optional inline verify command.",
+      ? "Atomically apply hunks, create, move, or delete files (all-or-nothing) with optional inline verify command. Prefer moveTo/delete here over shell mv/rm. Pass 'edits' as one JSON array string."
+      : "Atomically apply hunks, create, move, or delete files (all-or-nothing) with optional inline verify command. Prefer moveTo/delete here over shell mv/rm.",
     inputSchema: {
       type: "object",
       properties: {
@@ -318,7 +318,7 @@ export function createAgyFastServer(
     {
       name: "batch_search",
       description:
-        "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output.",
+        "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output. Prefer type:'def' for symbol definitions (exact Lstart-Lend) and type:'refs' for callers/usages/imports over 'text'.",
       inputSchema: {
         type: "object",
         properties: {
@@ -337,6 +337,8 @@ export function createAgyFastServer(
                 type: {
                   type: "string",
                   enum: ["text", "regex", "glob", "fuzzy", "git", "def", "refs"],
+                  description:
+                    "Use 'def' for symbol definitions, 'refs' for callers/usages/imports, 'text'/'regex' for literals or unknown strings, 'glob'/'fuzzy' for paths, 'git' for read-only git.",
                 },
                 pattern: {
                   type: "string",
