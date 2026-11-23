@@ -7253,6 +7253,9 @@ async function runTextOrRegexWithRg(query, searchRoot, baseCwd) {
       args.push(`--glob=!**/${dir}/**`);
     }
   }
+  if (!isExplicitTsBuildInfoQuery(query, searchRoot)) {
+    args.push("--glob=!*.tsbuildinfo");
+  }
   const runRg = async (runArgs, opts) => {
     const res = await execBinaryAsync("rg", runArgs, {
       cwd: baseCwd,
@@ -7514,7 +7517,9 @@ async function runTextOrRegexWithNode(query, searchRoot, baseCwd) {
   const globNegated = Boolean(query.glob && query.glob.startsWith("!"));
   const rawGlob = query.glob ? globNegated ? query.glob.slice(1) : query.glob : null;
   const globRegex = rawGlob ? globToRegExp(rawGlob) : null;
+  const allowTsBuildInfo = isExplicitTsBuildInfoQuery(query, searchRoot);
   const globMatchesFile = (relPosix) => {
+    if (!allowTsBuildInfo && isTsBuildInfoPath(relPosix)) return false;
     if (!matchesType(relPosix)) return false;
     if (!globRegex) return true;
     let matched = globRegex.test(relPosix);
@@ -7684,7 +7689,7 @@ function buildGlobFallbackPlan(pattern) {
   }
   return null;
 }
-async function formatGlobWalkResult(walked, searchRoot, baseCwd, maxResults, sortBy, notePrefix) {
+async function formatGlobWalkResult(walked, searchRoot, baseCwd, maxResults, sortBy, lineCountCache, notePrefix) {
   const relPrefix = toPosixPath(path6.relative(baseCwd, searchRoot));
   const sortedFiles = [...walked.files].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
   if (sortBy === "mtime") {
@@ -7697,10 +7702,12 @@ async function formatGlobWalkResult(walked, searchRoot, baseCwd, maxResults, sor
     }
     sortedFiles.sort((a, b) => mtimes.get(b) - mtimes.get(a) || (a < b ? -1 : a > b ? 1 : 0));
   }
-  const items = sortedFiles.slice(0, maxResults).map((f) => {
+  const rawItems = sortedFiles.slice(0, maxResults).map((f) => {
     if (!relPrefix || relPrefix === ".") return f;
     return `${relPrefix}/${f}`;
   });
+  const lineCounts = rawItems.length <= MAX_LINE_COUNT_FILES ? await collectFileLineCounts(rawItems, baseCwd, lineCountCache) : void 0;
+  const items = lineCounts ? rawItems.map((file) => formatFileWithLineCount(file, lineCounts.get(file))) : rawItems;
   const truncated = walked.truncated || sortedFiles.length > maxResults;
   const header = notePrefix ? `${notePrefix}
 ` : "";
@@ -7721,21 +7728,29 @@ async function formatGlobWalkResult(walked, searchRoot, baseCwd, maxResults, sor
 ... [truncated at ${maxResults} of ${totalLabel} files${dirSummary}]`;
   return `${header}${items.join("\n")}${suffix}`;
 }
-async function runGlobQuery(query, searchRoot, baseCwd, isFileTarget) {
+async function runGlobQuery(query, searchRoot, baseCwd, isFileTarget, lineCountCache) {
   const maxResults = clampInt(query.maxResults ?? 80, 1, 300);
   const pattern = query.pattern.trim() || "**/*";
   const matcher = globToRegExp(pattern);
   const matchBasename = !pattern.includes("/");
   const includeHidden = pattern.startsWith(".") || pattern.includes("/.");
+  const allowTsBuildInfo = isExplicitTsBuildInfoQuery(query, searchRoot);
   if (isFileTarget) {
     const rel = toPosixPath(path6.relative(baseCwd, searchRoot)) || path6.basename(searchRoot);
     const base = path6.basename(searchRoot);
     const matched = matcher.test(rel) || matchBasename && matcher.test(base);
-    if (matched) return rel;
+    if (matched) {
+      const lineCount = await getCachedFileLineCount(searchRoot, lineCountCache);
+      return formatFileWithLineCount(rel, lineCount);
+    }
     const fallback2 = buildGlobFallbackPlan(pattern);
     if (fallback2) {
-      return fallback2.match(rel, base) ? `${fallback2.matchedNote}
-${rel}` : fallback2.emptyMessage;
+      if (fallback2.match(rel, base)) {
+        const lineCount = await getCachedFileLineCount(searchRoot, lineCountCache);
+        return `${fallback2.matchedNote}
+${formatFileWithLineCount(rel, lineCount)}`;
+      }
+      return fallback2.emptyMessage;
     }
     return "(no files matched)";
   }
@@ -7744,6 +7759,7 @@ ${rel}` : fallback2.emptyMessage;
     maxFiles: scanLimit,
     includeHidden,
     fileFilter: (relPosix) => {
+      if (!allowTsBuildInfo && isTsBuildInfoPath(relPosix)) return false;
       if (matcher.test(relPosix)) return true;
       if (matchBasename) {
         const base = relPosix.split("/").pop() ?? relPosix;
@@ -7753,7 +7769,7 @@ ${rel}` : fallback2.emptyMessage;
     }
   });
   if (walked.files.length > 0) {
-    return formatGlobWalkResult(walked, searchRoot, baseCwd, maxResults, query.sortBy);
+    return formatGlobWalkResult(walked, searchRoot, baseCwd, maxResults, query.sortBy, lineCountCache);
   }
   const fallback = buildGlobFallbackPlan(pattern);
   if (fallback) {
@@ -7761,6 +7777,7 @@ ${rel}` : fallback2.emptyMessage;
       maxFiles: scanLimit,
       includeHidden,
       fileFilter: (relPosix) => {
+        if (!allowTsBuildInfo && isTsBuildInfoPath(relPosix)) return false;
         const base = relPosix.split("/").pop() ?? relPosix;
         return fallback.match(relPosix, base);
       }
@@ -7772,6 +7789,7 @@ ${rel}` : fallback2.emptyMessage;
         baseCwd,
         maxResults,
         query.sortBy,
+        lineCountCache,
         fallback.matchedNote
       );
     }
@@ -7782,15 +7800,19 @@ ${rel}` : fallback2.emptyMessage;
 function relativeFile(baseCwd, file) {
   return toPosixPath(path6.relative(baseCwd, path6.resolve(baseCwd, file))) || path6.basename(file);
 }
-async function runFuzzyQuery(query, searchRoot, baseCwd, isFileTarget) {
+async function runFuzzyQuery(query, searchRoot, baseCwd, isFileTarget, lineCountCache) {
   const pattern = query.pattern.trim();
   if (!pattern) throw new Error("Fuzzy pattern must not be blank");
   const matchesType = fileTypeMatcher(query.fileType);
+  const allowTsBuildInfo = isExplicitTsBuildInfoQuery(query, searchRoot);
+  const acceptFile = (relPosix) => (allowTsBuildInfo || !isTsBuildInfoPath(relPosix)) && matchesType(relPosix);
   const maxResults = clampInt(query.maxResults ?? 30, 1, 200);
-  const walked = isFileTarget ? { files: [searchRoot], truncated: false } : await walkFiles(searchRoot, { maxFiles: 8e3, fileFilter: matchesType });
-  const candidates = walked.files.filter(matchesType).map((file) => relativeFile(baseCwd, path6.resolve(searchRoot, file)));
+  const walked = isFileTarget ? { files: [searchRoot], truncated: false } : await walkFiles(searchRoot, { maxFiles: 8e3, fileFilter: acceptFile });
+  const candidates = walked.files.filter(acceptFile).map((file) => relativeFile(baseCwd, path6.resolve(searchRoot, file)));
   const { matches, totalMatched } = rankFuzzyPaths(pattern, candidates, maxResults);
-  const body = matches.map((match) => match.path).join("\n") || "(no files matched)";
+  const matchedPaths = matches.map((match) => match.path);
+  const lineCounts = matchedPaths.length > 0 && matchedPaths.length <= MAX_LINE_COUNT_FILES ? await collectFileLineCounts(matchedPaths, baseCwd, lineCountCache) : void 0;
+  const body = matchedPaths.map((file) => lineCounts ? formatFileWithLineCount(file, lineCounts.get(file)) : file).join("\n") || "(no files matched)";
   const footer = walked.truncated || totalMatched > maxResults ? `
 ... [truncated; showing ${matches.length} files]` : "";
   return body + footer;
@@ -7898,7 +7920,58 @@ async function runGitQuery(query, searchRoot) {
   const out = res.stdout.trimEnd();
   return out || "(empty output)";
 }
-function formatFileMatches(files, totalMatches, truncated) {
+var MAX_LINE_COUNT_BYTES = 512 * 1024;
+var MAX_LINE_COUNT_FILES = 40;
+function isTsBuildInfoPath(filePath) {
+  return filePath.toLowerCase().endsWith(".tsbuildinfo");
+}
+function isExplicitTsBuildInfoQuery(query, searchRoot) {
+  if (isTsBuildInfoPath(searchRoot)) return true;
+  const rawGlob = query.glob?.trim().toLowerCase() ?? "";
+  if (rawGlob && !rawGlob.startsWith("!") && rawGlob.includes("tsbuildinfo")) return true;
+  if ((query.type === "glob" || query.type === "fuzzy") && query.pattern.toLowerCase().includes("tsbuildinfo")) {
+    return true;
+  }
+  return false;
+}
+function getCachedFileLineCount(absPath, cache) {
+  const existing = cache.get(absPath);
+  if (existing) return existing;
+  const promise = (async () => {
+    try {
+      const st = await fs4.stat(absPath);
+      if (!st.isFile() || st.size > MAX_LINE_COUNT_BYTES) return null;
+      if (st.size === 0) return 0;
+      const buf = await fs4.readFile(absPath);
+      if (isLikelyBinary(buf)) return null;
+      let lines = 0;
+      for (let i = 0; i < buf.length; i++) {
+        if (buf[i] === 10) lines++;
+      }
+      if (buf[buf.length - 1] !== 10) lines++;
+      return lines;
+    } catch {
+      return null;
+    }
+  })();
+  cache.set(absPath, promise);
+  return promise;
+}
+async function collectFileLineCounts(relFiles, baseCwd, cache) {
+  const unique = [...new Set(relFiles)].slice(0, MAX_LINE_COUNT_FILES);
+  const result = /* @__PURE__ */ new Map();
+  await Promise.all(
+    unique.map(async (relFile) => {
+      const absPath = resolvePath(relFile, baseCwd);
+      result.set(relFile, await getCachedFileLineCount(absPath, cache));
+    })
+  );
+  return result;
+}
+function formatFileWithLineCount(file, lineCount) {
+  return typeof lineCount === "number" ? `${file} (${lineCount}L)` : file;
+}
+function formatFileMatches(files, totalMatches, truncated, lineCounts) {
   if (files.length === 0) {
     return "(no matches)";
   }
@@ -7909,7 +7982,8 @@ function formatFileMatches(files, totalMatches, truncated) {
       const text = l.text.length > 240 ? `${sliceSafeChars(l.text, 240)}...` : l.text;
       return `  ${l.lineNumber}${sep} ${text}`;
     });
-    blocks.push(`${fm.file}
+    const header = formatFileWithLineCount(fm.file, lineCounts?.get(fm.file));
+    blocks.push(`${header}
 ${lines.join("\n")}`);
   }
   const footer = truncated ? `
@@ -8016,7 +8090,7 @@ async function runTextOrRegexInternal(query, searchRoot, baseCwd, useRg) {
   }
   return await runTextOrRegexWithNode(query, searchRoot, baseCwd);
 }
-async function runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache) {
+async function runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache) {
   const rawPattern = query.pattern.trim();
   if (!rawPattern) {
     throw new Error("Query 'pattern' must be a non-empty symbol name");
@@ -8100,14 +8174,23 @@ async function runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache) {
   if (matchedFiles.length === 0) {
     return "(no definitions found)";
   }
+  const lineCounts = await collectFileLineCounts(
+    matchedFiles.map((f) => f.file),
+    baseCwd,
+    lineCountCache
+  );
   if (query.outputMode === "files_with_matches") {
-    const body = matchedFiles.map((f) => f.file).join("\n");
+    const body = matchedFiles.map((f) => formatFileWithLineCount(f.file, lineCounts.get(f.file))).join("\n");
     const footer2 = truncated ? `
 ... [truncated; showing ${matchedFiles.length} files]` : "";
     return `${body}${footer2}`;
   }
   if (query.outputMode === "count") {
-    const body = matchedFiles.map((f) => `${f.file}: ${f.defs.length} definitions`).join("\n");
+    const body = matchedFiles.map((f) => {
+      const lc = lineCounts.get(f.file);
+      const lcTag = typeof lc === "number" ? ` (${lc}L)` : "";
+      return `${f.file}: ${f.defs.length} definitions${lcTag}`;
+    }).join("\n");
     const footer2 = truncated ? `
 ... [truncated; showing ${matchedFiles.length} files]` : "";
     return `${body}${footer2}`;
@@ -8156,14 +8239,14 @@ ${bodyLines.join("\n")}`;
       return `${header}
 ${previewLines.join("\n")}`;
     });
-    return `${file}
+    return `${formatFileWithLineCount(file, lineCounts.get(file))}
 ${lines.join("\n")}`;
   });
   const footer = truncated ? `
 ... [truncated at ${totalDefs} definitions]` : "";
   return `${blocks.join("\n")}${footer}`;
 }
-async function runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache) {
+async function runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache) {
   const rawPattern = query.pattern.trim();
   if (!rawPattern) {
     throw new Error("Query 'pattern' must be a non-empty symbol name");
@@ -8282,23 +8365,32 @@ async function runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache) {
   }
   const footer = notes.length > 0 ? `
 ${notes.join("\n")}` : "";
+  const lineCounts = await collectFileLineCounts(
+    outputFiles.map((f) => f.file),
+    baseCwd,
+    lineCountCache
+  );
   if (query.outputMode === "files_with_matches") {
-    return `${outputFiles.map((f) => f.file).join("\n")}${footer}`;
+    return `${outputFiles.map((f) => formatFileWithLineCount(f.file, lineCounts.get(f.file))).join("\n")}${footer}`;
   }
   if (query.outputMode === "count") {
-    return `${outputFiles.map((f) => `${f.file}: ${f.lines.length} refs`).join("\n")}${footer}`;
+    return `${outputFiles.map((f) => {
+      const lc = lineCounts.get(f.file);
+      const lcTag = typeof lc === "number" ? ` (${lc}L)` : "";
+      return `${f.file}: ${f.lines.length} refs${lcTag}`;
+    }).join("\n")}${footer}`;
   }
   const blocks = outputFiles.map(({ file, lines }) => {
     const formatted = lines.map((l) => {
       const text = l.text.length > 220 ? `${sliceSafeChars(l.text, 220)}...` : l.text;
       return l.callerTag ? `  ${l.lineNumber}: ${text}  ${l.callerTag}` : `  ${l.lineNumber}: ${text}`;
     });
-    return `${file}
+    return `${formatFileWithLineCount(file, lineCounts.get(file))}
 ${formatted.join("\n")}`;
   });
   return `${blocks.join("\n")}${footer}`;
 }
-async function executeSingleQuery(query, index, baseCwd, useRg, symbolCache) {
+async function executeSingleQuery(query, index, baseCwd, useRg, symbolCache, lineCountCache) {
   const header = `## Query ${index + 1} [${query.type}] ${query.pattern}${query.path ? ` (in ${query.path})` : ""}`;
   try {
     if (!query.pattern || typeof query.pattern !== "string") {
@@ -8327,36 +8419,48 @@ async function executeSingleQuery(query, index, baseCwd, useRg, symbolCache) {
 ${out}`;
     }
     if (query.type === "glob") {
-      const out = await runGlobQuery(query, searchRoot, baseCwd, targetStat.isFile());
+      const out = await runGlobQuery(query, searchRoot, baseCwd, targetStat.isFile(), lineCountCache);
       return `${header}
 ${out}`;
     }
     if (query.type === "fuzzy") {
-      const out = await runFuzzyQuery(query, searchRoot, baseCwd, targetStat.isFile());
+      const out = await runFuzzyQuery(query, searchRoot, baseCwd, targetStat.isFile(), lineCountCache);
       return `${header}
 ${out}`;
     }
     if (query.type === "def") {
-      const out = await runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache);
+      const out = await runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache);
       return `${header}
 ${out}`;
     }
     if (query.type === "refs") {
-      const out = await runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache);
+      const out = await runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache);
       return `${header}
 ${out}`;
     }
     if (query.type === "text" || query.type === "regex") {
       const res = await runTextOrRegexInternal(query, searchRoot, baseCwd, useRg);
+      const lineCounts = res.files.length > 0 ? await collectFileLineCounts(
+        res.files.map((f) => f.file),
+        baseCwd,
+        lineCountCache
+      ) : void 0;
       if (query.outputMode === "count" || query.outputMode === "files_with_matches") {
-        const body = res.files.map(({ file, count }) => query.outputMode === "count" ? `${file}: ${count} ${query.multiline ? "matches" : "matching lines"}` : file).join("\n") || "(no matches)";
+        const body = res.files.map(({ file, count }) => {
+          const lc = lineCounts?.get(file);
+          if (query.outputMode === "count") {
+            const lcTag = typeof lc === "number" ? ` (${lc}L)` : "";
+            return `${file}: ${count} ${query.multiline ? "matches" : "matching lines"}${lcTag}`;
+          }
+          return formatFileWithLineCount(file, lc);
+        }).join("\n") || "(no matches)";
         const footer = res.truncated ? `
 ... [truncated; showing ${res.files.length} files]` : "";
         return `${header}
 ${body}${footer}`;
       }
       return `${header}
-${formatFileMatches(res.files, res.totalMatches, res.truncated)}`;
+${formatFileMatches(res.files, res.totalMatches, res.truncated, lineCounts)}`;
     }
     throw new Error(`Unsupported query type: ${String(query.type)}`);
   } catch (err) {
@@ -8440,8 +8544,9 @@ async function runBatchSearch(input, options = {}) {
   );
   const useRg = needsTextSearch && !options.forceNodeFallback && await isRipgrepAvailable();
   const symbolCache = /* @__PURE__ */ new Map();
+  const lineCountCache = /* @__PURE__ */ new Map();
   const sections = await Promise.all(
-    queries.map((q, idx) => executeSingleQuery(q, idx, baseCwd, useRg, symbolCache))
+    queries.map((q, idx) => executeSingleQuery(q, idx, baseCwd, useRg, symbolCache, lineCountCache))
   );
   return {
     text: fitSectionsToByteBudget(sections, maxChars, maxBytes, "\n\n"),
@@ -9245,7 +9350,7 @@ function createAgyFastServer(options = {}) {
   server.registerTool(
     {
       name: "batch_search",
-      description: "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output. Prefer type:'def' for symbol definitions (exact Lstart-Lend) and type:'refs' for callers/usages/imports over 'text'.",
+      description: "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output and (NL) file line counts. Prefer type:'def' for symbol definitions (exact Lstart-Lend) and type:'refs' for callers/usages/imports over 'text'.",
       inputSchema: {
         type: "object",
         properties: {
@@ -9407,7 +9512,7 @@ function createAgyFastServer(options = {}) {
   server.registerTool(
     {
       name: "quick_outline",
-      description: "Fast symbol/section outline extractor for unknown large files (TS/JS/HTML/Vue/Svelte/CSS/Python/GDScript/Go/Rust/Java/MD/JSON/YAML; prefer 10-20 files/batch, max 40). Flat paths-only schema for mapping line ranges before parallel built-in read_file(StartLine, EndLine).",
+      description: "Fast symbol/section outline extractor for >=2 unfamiliar files or any >300-line file (TS/JS/HTML/Vue/Svelte/CSS/Python/GDScript/Go/Rust/Java/MD/JSON/YAML; prefer 10-20 files/batch, max 40). Flat paths-only schema for mapping exact symbol line ranges in 1 call before parallel built-in read_file(StartLine, EndLine).",
       inputSchema: {
         type: "object",
         properties: {

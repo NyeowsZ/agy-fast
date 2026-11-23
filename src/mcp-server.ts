@@ -326,7 +326,7 @@ export function createAgyFastServer(
     {
       name: "batch_search",
       description:
-        "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output. Prefer type:'def' for symbol definitions (exact Lstart-Lend) and type:'refs' for callers/usages/imports over 'text'.",
+        "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output and (NL) file line counts. Prefer type:'def' for symbol definitions (exact Lstart-Lend) and type:'refs' for callers/usages/imports over 'text'.",
       inputSchema: {
         type: "object",
         properties: {
@@ -495,7 +495,7 @@ export function createAgyFastServer(
     {
       name: "quick_outline",
       description:
-        "Fast symbol/section outline extractor for unknown large files (TS/JS/HTML/Vue/Svelte/CSS/Python/GDScript/Go/Rust/Java/MD/JSON/YAML; prefer 10-20 files/batch, max 40). Flat paths-only schema for mapping line ranges before parallel built-in read_file(StartLine, EndLine).",
+        "Fast symbol/section outline extractor for >=2 unfamiliar files or any >300-line file (TS/JS/HTML/Vue/Svelte/CSS/Python/GDScript/Go/Rust/Java/MD/JSON/YAML; prefer 10-20 files/batch, max 40). Flat paths-only schema for mapping exact symbol line ranges in 1 call before parallel built-in read_file(StartLine, EndLine).",
       inputSchema: {
         type: "object",
         properties: {

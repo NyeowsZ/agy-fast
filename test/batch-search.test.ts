@@ -31,9 +31,9 @@ describe("batch_search", () => {
           ],
         }, { forceNodeFallback });
         const sections = text.split("\n\n");
-        assert.match(sections[0]!, /a\.ts: 75 matching lines/);
+        assert.match(sections[0]!, /a\.ts: 75 matching lines \(75L\)/);
         assert.match(sections[0]!, /truncated; showing 1 files/);
-        assert.equal(sections[1]!.split("\n").at(-1), "b.tsx");
+        assert.equal(sections[1]!.split("\n").at(-1), "b.tsx (1L)");
         assert.match(sections[2]!, /\(no matches\)/);
         assert.match(sections[3]!, /\(no matches\)/);
       } finally {
@@ -68,17 +68,17 @@ describe("batch_search", () => {
         }, { forceNodeFallback });
         const sections = text.split("\n\n");
         assert.deepEqual(sections[0]!.split("\n").slice(1), [
-          "a.ts", "  1- before", "  2: start one", "  3: end", "  4- after",
+          "a.ts (4L)", "  1- before", "  2: start one", "  3: end", "  4- after",
         ]);
         assert.match(sections[1]!, /2: start one\n\.\.\. \[truncated/);
-        assert.equal(sections[2]!.split("\n").at(-1), "a.ts");
-        assert.match(sections[3]!, /b\.ts: 2 matches/);
-        assert.match(sections[4]!, /a\.ts: 1 matches/);
+        assert.equal(sections[2]!.split("\n").at(-1), "a.ts (4L)");
+        assert.match(sections[3]!, /b\.ts: 2 matches \(1L\)/);
+        assert.match(sections[4]!, /a\.ts: 1 matches \(4L\)/);
         assert.match(sections[5]!, /\(no matches\)/);
-        assert.equal(sections[6]!.split("\n").at(-1), "a.ts");
+        assert.equal(sections[6]!.split("\n").at(-1), "a.ts (4L)");
         assert.match(sections[7]!, /\(no matches\)/);
-        assert.match(sections[8]!, /a\.ts: 4 matches/);
-        assert.match(sections[9]!, /emoji\.ts: 1 matches/);
+        assert.match(sections[8]!, /a\.ts: 4 matches \(4L\)/);
+        assert.match(sections[9]!, /emoji\.ts: 1 matches \(1L\)/);
       } finally {
         await fs.rm(cwd, { recursive: true, force: true });
       }
@@ -103,11 +103,11 @@ describe("batch_search", () => {
         ],
       });
       const sections = text.split("\n\n");
-      assert.deepEqual(sections[0]!.split("\n").slice(1), ["mcpserv.ts", "mcp-server.ts"]);
-      assert.equal(sections[1]!.split("\n")[1], "mcpserv.ts");
+      assert.deepEqual(sections[0]!.split("\n").slice(1), ["mcpserv.ts (0L)", "mcp-server.ts (0L)"]);
+      assert.equal(sections[1]!.split("\n")[1], "mcpserv.ts (0L)");
       assert.match(sections[1]!, /truncated; showing 1 files/);
-      assert.equal(sections[2]!.split("\n")[1], "mcpserv.ts");
-      assert.deepEqual(sections[3]!.split("\n").slice(1), ["mcp-server.ts", "mcpserv.ts"]);
+      assert.equal(sections[2]!.split("\n")[1], "mcpserv.ts (0L)");
+      assert.deepEqual(sections[3]!.split("\n").slice(1), ["mcp-server.ts (0L)", "mcpserv.ts (0L)"]);
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }
@@ -145,9 +145,9 @@ describe("batch_search", () => {
       const sections = fuzzyRes.text.split("\n\n");
       assert.match(sections[0]!, /src\/tools\/batch-search\.ts/);
       assert.deepEqual(sections[1]!.split("\n").slice(1), [
-        "a_serv.ts",
-        "s_xx_serv.ts",
-        "s_xx_e_r_v.ts",
+        "a_serv.ts (0L)",
+        "s_xx_serv.ts (0L)",
+        "s_xx_e_r_v.ts (0L)",
       ]);
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
@@ -488,7 +488,7 @@ describe("batch_search", () => {
     assert.doesNotMatch(nodeCtx.text, /a2_pre/);
     assert.doesNotMatch(nodeCtx.text, /b_pre/);
     // Ensure rg output contains only files that have at least one actual ':' match line
-    const rgFileBlocks = rgCtx.text.split(/\n(?=[ab]\.txt\n)/).slice(1);
+    const rgFileBlocks = rgCtx.text.split(/\n(?=[ab]\.txt(?: \(\d+L\))?\n)/).slice(1);
     for (const block of rgFileBlocks) {
       assert.match(block, /\d+: /, `Orphan context block without match:\n${block}`);
     }
@@ -517,25 +517,25 @@ describe("batch_search", () => {
     // d0 holds f00, f04, f08, ...; two matches per file, so 7 matches end
     // after the first match of the fourth file.
     const expected = [
-      "d0/f00.txt",
+      "d0/f00.txt (5L)",
       "  1- pre",
       "  2: MANY_NEEDLE one",
       "  3- mid",
       "  4: MANY_NEEDLE two",
       "  5- post",
-      "d0/f04.txt",
+      "d0/f04.txt (5L)",
       "  1- pre",
       "  2: MANY_NEEDLE one",
       "  3- mid",
       "  4: MANY_NEEDLE two",
       "  5- post",
-      "d0/f08.txt",
+      "d0/f08.txt (5L)",
       "  1- pre",
       "  2: MANY_NEEDLE one",
       "  3- mid",
       "  4: MANY_NEEDLE two",
       "  5- post",
-      "d0/f12.txt",
+      "d0/f12.txt (5L)",
       "  1- pre",
       "  2: MANY_NEEDLE one",
       "  3- mid",
@@ -561,13 +561,13 @@ describe("batch_search", () => {
       { forceNodeFallback: true },
     );
     const multilineExpected = [
-      "d0/f00.txt",
+      "d0/f00.txt (5L)",
       "  2: MANY_NEEDLE one",
       "  3: mid",
-      "d0/f04.txt",
+      "d0/f04.txt (5L)",
       "  2: MANY_NEEDLE one",
       "  3: mid",
-      "d0/f08.txt",
+      "d0/f08.txt (5L)",
       "  2: MANY_NEEDLE one",
       "... [truncated at 5 matches]",
     ].join("\n");
@@ -1026,7 +1026,7 @@ describe("batch_search", () => {
         const sections = combined.text.split("\n\n");
 
         // 1. Bare def: returns exact spans, skips call sites, ranks src/ ahead of test/
-        assert.match(sections[0]!, /src\/auth\/service\.ts\n  L2-L5 \[method\] AuthService\.login/);
+        assert.match(sections[0]!, /src\/auth\/service\.ts \(10L\)\n  L2-L5 \[method\] AuthService\.login/);
         assert.doesNotMatch(sections[0]!, /checkout\.ts/);
         assert.ok(
           sections[0]!.indexOf("src/auth/service.ts") < sections[0]!.indexOf("test/auth.test.ts"),
@@ -1160,6 +1160,71 @@ describe("batch_search", () => {
         assert.match(sections[3]!, /L5-L57 \[function\] hugeHelper/);
         assert.match(sections[3]!, /53 lines total — read with read_file L5-L57/);
         assert.doesNotMatch(sections[3]!, /step49/);
+      }
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("annotates file line counts (NL) across query modes and excludes *.tsbuildinfo by default", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-linecounts-"));
+    try {
+      await fs.mkdir(path.join(dir, "backend"), { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "backend", "fcm.ts"),
+        "export function dispatchNotice() {\n  return 'ok';\n}",
+        "utf8",
+      ); // 3 lines, no trailing newline
+      await fs.writeFile(
+        path.join(dir, "backend", "caller.ts"),
+        "import { dispatchNotice } from './fcm';\nexport const run = () => dispatchNotice();\n",
+        "utf8",
+      ); // 2 lines, trailing newline
+      await fs.writeFile(
+        path.join(dir, "backend", "tsconfig.tsbuildinfo"),
+        '{"fileNames":["./fcm.ts"],"dispatchNotice":true}\n',
+        "utf8",
+      );
+
+      for (const forceNodeFallback of [false, true]) {
+        const res = await runBatchSearch(
+          {
+            cwd: dir,
+            queries: [
+              { type: "text", pattern: "dispatchNotice" },
+              { type: "def", pattern: "dispatchNotice" },
+              { type: "refs", pattern: "dispatchNotice" },
+              { type: "fuzzy", pattern: "backend" },
+              { type: "glob", pattern: "**/*" },
+              { type: "text", pattern: "dispatchNotice", glob: "*.tsbuildinfo" },
+              { type: "glob", pattern: "**/*.tsbuildinfo" },
+            ],
+          },
+          { forceNodeFallback },
+        );
+        assert.equal(res.isError, false, res.text);
+        const sections = res.text.split("\n\n");
+
+        // Line counts present & accurate (3L without trailing LF, 2L with trailing LF)
+        assert.match(sections[0]!, /backend\/fcm\.ts \(3L\)/);
+        assert.match(sections[0]!, /backend\/caller\.ts \(2L\)/);
+        assert.match(sections[1]!, /backend\/fcm\.ts \(3L\)/);
+        assert.match(sections[2]!, /backend\/caller\.ts \(2L\)/);
+        assert.match(sections[3]!, /backend\/fcm\.ts \(3L\)/);
+        assert.match(sections[4]!, /backend\/caller\.ts \(2L\)/);
+
+        // *.tsbuildinfo excluded by default across text, def, refs, fuzzy, and glob
+        for (let i = 0; i <= 4; i++) {
+          assert.doesNotMatch(
+            sections[i]!,
+            /tsconfig\.tsbuildinfo/,
+            `Query ${i + 1} (forceNodeFallback=${forceNodeFallback}) must exclude *.tsbuildinfo by default`,
+          );
+        }
+
+        // Explicitly targeted *.tsbuildinfo queries still work
+        assert.match(sections[5]!, /backend\/tsconfig\.tsbuildinfo \(1L\)/);
+        assert.match(sections[6]!, /backend\/tsconfig\.tsbuildinfo \(1L\)/);
       }
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
