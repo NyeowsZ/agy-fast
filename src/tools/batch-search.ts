@@ -22,7 +22,7 @@ import {
 } from "../utils/output-filter.js";
 import { extractSymbols, type SymbolEntry } from "./read-slices.js";
 
-export type SearchQueryType = "text" | "regex" | "glob" | "fuzzy" | "git" | "def" | "refs";
+export type SearchQueryType = "symbol" | "def" | "refs" | "text" | "regex" | "glob" | "fuzzy" | "git";
 
 export interface SearchQuery {
   type: SearchQueryType;
@@ -1468,6 +1468,9 @@ function getCachedFileLineCount(
   return promise;
 }
 
+const LARGE_FILE_OUTLINE_THRESHOLD = 300;
+const lineCountLargeFiles = new WeakMap<LineCountCache, Map<string, number>>();
+
 async function collectFileLineCounts(
   relFiles: string[],
   baseCwd: string,
@@ -1475,10 +1478,15 @@ async function collectFileLineCounts(
 ): Promise<Map<string, number | null>> {
   const unique = [...new Set(relFiles)].slice(0, MAX_LINE_COUNT_FILES);
   const result = new Map<string, number | null>();
+  const largeFiles = lineCountLargeFiles.get(cache);
   await Promise.all(
     unique.map(async (relFile) => {
       const absPath = resolvePath(relFile, baseCwd);
-      result.set(relFile, await getCachedFileLineCount(absPath, cache));
+      const count = await getCachedFileLineCount(absPath, cache);
+      result.set(relFile, count);
+      if (largeFiles && typeof count === "number" && count > LARGE_FILE_OUTLINE_THRESHOLD) {
+        largeFiles.set(relFile, count);
+      }
     }),
   );
   return result;
@@ -1708,7 +1716,7 @@ async function runDefQuery(
   );
 
   if (candidateRes.files.length === 0) {
-    return "(no definitions found)";
+    return "(no definitions found — try type:'refs' or 'text' if this is a property, destructured binding, or literal)";
   }
 
   // Sort non-test source files ahead of test/spec/mock files before extracting symbols
@@ -1770,7 +1778,7 @@ async function runDefQuery(
   }
 
   if (matchedFiles.length === 0) {
-    return "(no definitions found)";
+    return "(no definitions found — try type:'refs' or 'text' if this is a property, destructured binding, or literal)";
   }
 
   const lineCounts = await collectFileLineCounts(
@@ -1798,7 +1806,7 @@ async function runDefQuery(
     return `${body}${footer}`;
   }
 
-  const includeBody = Boolean(query.includeBody);
+  const includeBody = query.includeBody !== false;
   const MAX_DEF_INLINE_BODY_LINES = 40;
   const DEF_LARGE_PREVIEW_LINES = 3;
 
@@ -2029,6 +2037,44 @@ async function runRefsQuery(
   return `${blocks.join("\n")}${footer}`;
 }
 
+function looksLikeCodeSymbol(pattern: string): boolean {
+  const p = pattern.trim();
+  if (p.length < 4 || p.length > 80) return false;
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(p)) return false;
+  // camelCase (sendFcmNotification, fcmTokens), digit-hump (V1Context),
+  // multi-hump PascalCase (CustomerNotification), or snake_case / SCREAMING_SNAKE
+  if (/[a-z][A-Z]/.test(p)) return true;
+  if (/[0-9][A-Z]/.test(p)) return true;
+  if (/^[A-Z][a-z]+[A-Z]/.test(p)) return true;
+  if (/^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+$/.test(p)) return true;
+  return false;
+}
+
+async function runSymbolQuery(
+  query: SearchQuery,
+  searchRoot: string,
+  baseCwd: string,
+  useRg: boolean,
+  symbolCache: SymbolCache,
+  lineCountCache: LineCountCache,
+): Promise<string> {
+  const [defOut, refsOut] = await Promise.all([
+    runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache),
+    runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache),
+  ]);
+  const noDef = defOut.startsWith("(no definitions found");
+  const noRefs = refsOut === "(no references found)";
+  if (noDef && noRefs) {
+    return "(no definitions or references found — try type:'text' if this is a string literal or partial match)";
+  }
+  return `### Definitions\n${defOut}\n### References\n${refsOut}`;
+}
+
+interface BatchQueryContext {
+  defPatterns: Set<string>;
+  symbolOrRefsPatterns: Set<string>;
+}
+
 async function executeSingleQuery(
   query: SearchQuery,
   index: number,
@@ -2036,6 +2082,7 @@ async function executeSingleQuery(
   useRg: boolean,
   symbolCache: SymbolCache,
   lineCountCache: LineCountCache,
+  batchCtx: BatchQueryContext,
 ): Promise<string> {
   const header = `## Query ${index + 1} [${query.type}] ${query.pattern}${query.path ? ` (in ${query.path})` : ""}`;
   try {
@@ -2075,6 +2122,11 @@ async function executeSingleQuery(
       return `${header}\n${out}`;
     }
 
+    if (query.type === "symbol") {
+      const out = await runSymbolQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache);
+      return `${header}\n${out}`;
+    }
+
     if (query.type === "def") {
       const out = await runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache);
       return `${header}\n${out}`;
@@ -2082,7 +2134,15 @@ async function executeSingleQuery(
 
     if (query.type === "refs") {
       const out = await runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache);
-      return `${header}\n${out}`;
+      const trimmedPat = query.pattern.trim();
+      const shouldNudgePair =
+        (query.outputMode ?? "content") === "content" &&
+        out !== "(no references found)" &&
+        !batchCtx.defPatterns.has(trimmedPat);
+      const tip = shouldNudgePair
+        ? `\n[tip] Use type:'symbol' (or pair with type:'def') to get the definition body + refs together in 1 call.`
+        : "";
+      return `${header}\n${out}${tip}`;
     }
 
     if (query.type === "text" || query.type === "regex") {
@@ -2107,7 +2167,16 @@ async function executeSingleQuery(
         const footer = res.truncated ? `\n... [truncated; showing ${res.files.length} files]` : "";
         return `${header}\n${body}${footer}`;
       }
-      return `${header}\n${formatFileMatches(res.files, res.totalMatches, res.truncated, lineCounts)}`;
+      const trimmedPat = query.pattern.trim();
+      const shouldNudgeSymbol =
+        query.type === "text" &&
+        res.files.length > 0 &&
+        looksLikeCodeSymbol(trimmedPat) &&
+        !batchCtx.symbolOrRefsPatterns.has(trimmedPat);
+      const tip = shouldNudgeSymbol
+        ? `\n[tip] '${trimmedPat}' looks like a symbol — use type:'symbol' (or 'def'+'refs') for exact Lstart-Lend, inline body, and caller tags.`
+        : "";
+      return `${header}\n${formatFileMatches(res.files, res.totalMatches, res.truncated, lineCounts)}${tip}`;
     }
 
     throw new Error(`Unsupported query type: ${String(query.type)}`);
@@ -2201,16 +2270,53 @@ export async function runBatchSearch(
   const maxChars = clampInt(input.maxChars ?? 8_500, 500, DEFAULT_INLINE_MAX_BYTES);
   const maxBytes = DEFAULT_INLINE_MAX_BYTES;
   const needsTextSearch = queries.some(
-    (q) => q.type === "text" || q.type === "regex" || q.type === "def" || q.type === "refs",
+    (q) =>
+      q.type === "symbol" ||
+      q.type === "text" ||
+      q.type === "regex" ||
+      q.type === "def" ||
+      q.type === "refs",
   );
   const useRg =
     needsTextSearch && !options.forceNodeFallback && (await isRipgrepAvailable());
   const symbolCache: SymbolCache = new Map();
   const lineCountCache: LineCountCache = new Map();
+  const largeFiles = new Map<string, number>();
+  lineCountLargeFiles.set(lineCountCache, largeFiles);
+
+  const batchCtx: BatchQueryContext = {
+    defPatterns: new Set(
+      queries
+        .filter((q) => (q.type === "def" || q.type === "symbol") && typeof q.pattern === "string")
+        .map((q) => q.pattern.trim()),
+    ),
+    symbolOrRefsPatterns: new Set(
+      queries
+        .filter(
+          (q) =>
+            (q.type === "symbol" || q.type === "def" || q.type === "refs") &&
+            typeof q.pattern === "string",
+        )
+        .map((q) => q.pattern.trim()),
+    ),
+  };
 
   const sections = await Promise.all(
-    queries.map((q, idx) => executeSingleQuery(q, idx, baseCwd, useRg, symbolCache, lineCountCache)),
+    queries.map((q, idx) =>
+      executeSingleQuery(q, idx, baseCwd, useRg, symbolCache, lineCountCache, batchCtx),
+    ),
   );
+
+  if (largeFiles.size > 0 && sections.length > 0 && maxChars >= 1200) {
+    const sortedLarge = [...largeFiles.entries()].sort((a, b) => b[1] - a[1]);
+    const shown = sortedLarge.slice(0, 5).map(([f, lc]) => `${f} (${lc}L)`);
+    const more = sortedLarge.length > 5 ? ` (+${sortedLarge.length - 5} more)` : "";
+    const nudge =
+      sortedLarge.length === 1
+        ? `[next] Large file (>${LARGE_FILE_OUTLINE_THRESHOLD}L): ${shown[0]} — call quick_outline first before ranged read_file.`
+        : `[next] Large files (>${LARGE_FILE_OUTLINE_THRESHOLD}L): ${shown.join(", ")}${more} — call quick_outline in 1 batch before ranged read_file.`;
+    sections[sections.length - 1] = `${sections[sections.length - 1]}\n${nudge}`;
+  }
 
   // Allocate budget fairly across queries via water-filling within maxChars & inline UTF-8 byte ceiling
   return {

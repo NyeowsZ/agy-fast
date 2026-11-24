@@ -93,6 +93,8 @@ function scanBracesOnLine(
   close: number;
   openParen: number;
   closeParen: number;
+  openBracket: number;
+  closeBracket: number;
   endsWithSemi: boolean;
   lastCodeChar: string;
 } {
@@ -100,6 +102,8 @@ function scanBracesOnLine(
   let close = 0;
   let openParen = 0;
   let closeParen = 0;
+  let openBracket = 0;
+  let closeBracket = 0;
   let parenDepth = state.parenDepth ?? 0;
   let seenOpen = alreadySeenOpen;
   let inSingle = false;
@@ -251,6 +255,12 @@ function scanBracesOnLine(
       closeParen++;
       parenDepth = Math.max(0, parenDepth - 1);
       lastCodeChar = ")";
+    } else if (ch === "[") {
+      openBracket++;
+      lastCodeChar = "[";
+    } else if (ch === "]") {
+      closeBracket++;
+      lastCodeChar = "]";
     } else if (!/\s/.test(ch)) {
       lastCodeChar = ch;
     }
@@ -263,6 +273,8 @@ function scanBracesOnLine(
     close,
     openParen,
     closeParen,
+    openBracket,
+    closeBracket,
     endsWithSemi: lastCodeChar === ";",
     lastCodeChar,
   };
@@ -380,6 +392,53 @@ function findParenCallEnd(lines: string[], startIdx: number): number {
   return startIdx + 1;
 }
 
+function findTsValueDeclEnd(lines: string[], startIdx: number): number {
+  const firstLine = lines[startIdx] ?? "";
+  const eqIdx = firstLine.indexOf("=");
+  const state: ScanState = {
+    inBlockComment: false,
+    templateExprStack: [],
+    inBacktick: false,
+    parenDepth: 0,
+  };
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let seenOpen = false;
+  const maxScan = Math.min(lines.length, startIdx + 400);
+
+  for (let i = startIdx; i < maxScan; i++) {
+    const segment = i === startIdx && eqIdx >= 0 ? firstLine.slice(eqIdx + 1) : lines[i]!;
+    const { open, close, openParen, openBracket, closeBracket, endsWithSemi, lastCodeChar } =
+      scanBracesOnLine(segment, state, "js");
+    if (open > 0 || openParen > 0 || openBracket > 0) {
+      seenOpen = true;
+    }
+    braceDepth += open - close;
+    bracketDepth += openBracket - closeBracket;
+    const parenDepth = state.parenDepth ?? 0;
+
+    if (
+      seenOpen &&
+      braceDepth <= 0 &&
+      parenDepth <= 0 &&
+      bracketDepth <= 0 &&
+      !state.inBacktick &&
+      !state.inBlockComment
+    ) {
+      return i + 1;
+    }
+    if (
+      !seenOpen &&
+      !state.inBacktick &&
+      !state.inBlockComment &&
+      (endsWithSemi || (lastCodeChar !== "" && lastCodeChar !== "="))
+    ) {
+      return i + 1;
+    }
+  }
+  return seenOpen ? Math.min(lines.length, maxScan) : startIdx + 1;
+}
+
 function hasArrowOrBraceWithin(lines: string[], startIdx: number, maxLookahead = 12): { hasArrow: boolean; hasBrace: boolean } {
   const state: ScanState = { inBlockComment: false, templateExprStack: [], inBacktick: false };
   let parenDepth = 0;
@@ -438,9 +497,16 @@ function extractTsJsSymbols(lines: string[]): SymbolEntry[] {
   ];
   const multilineArrowStartRe =
     /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s+)?\(/;
+  const exportedValueDeclRe =
+    /^export\s+(?:declare\s+)?(const|let|var)\s+([A-Za-z_$][\w$]*)\b/;
+  const structuredLocalValueDeclRe =
+    /^(const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:(?:new\s+[\w.$]+|[\w.$]+)(?:\s*<[^>]*>)?\s*\(|\{|\[|$)/;
+  const objectLiteralInitRe = /=\s*(?:Object\.freeze\s*\(\s*)?\{/;
 
   const methodHeaderRe =
     /^([ \t]{1,4})(?:(?:public|private|protected|static|readonly|override|abstract|async|get|set)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/;
+  const objPropFnRe =
+    /^([ \t]{1,4})([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|[A-Za-z_$][\w$]*\s*=>)/;
   const controlKeywords = new Set([
     "if",
     "for",
@@ -465,6 +531,8 @@ function extractTsJsSymbols(lines: string[]): SymbolEntry[] {
 
   let currentClassEnd = -1;
   let currentClassIndent = -1;
+  let currentObjEnd = -1;
+  let currentObjIndent = -1;
   let currentFnEnd = -1;
   let currentSuiteEnd = -1;
   const commentState: ScanState = {
@@ -548,6 +616,25 @@ function extractTsJsSymbols(lines: string[]): SymbolEntry[] {
           matchedTop = true;
         }
       }
+
+      if (!matchedTop) {
+        const mv = exportedValueDeclRe.exec(line) ?? structuredLocalValueDeclRe.exec(line);
+        if (mv && mv[1] && mv[2]) {
+          const endLine = findTsValueDeclEnd(lines, i);
+          symbols.push({
+            kind: mv[1],
+            name: mv[2],
+            startLine: i + 1,
+            endLine,
+            depth: 0,
+          });
+          if (endLine > i + 1 && objectLiteralInitRe.test(line)) {
+            currentObjEnd = endLine;
+            currentObjIndent = -1;
+          }
+          matchedTop = true;
+        }
+      }
     }
 
     if (!matchedTop && i + 1 <= currentClassEnd) {
@@ -564,6 +651,29 @@ function extractTsJsSymbols(lines: string[]): SymbolEntry[] {
             symbols.push({
               kind: "method",
               name: mm[2],
+              startLine: i + 1,
+              endLine,
+              depth: 1,
+            });
+          }
+        }
+      }
+    } else if (!matchedTop && i + 1 <= currentObjEnd) {
+      const mp = objPropFnRe.exec(line);
+      const mm = mp ? null : methodHeaderRe.exec(line);
+      const match = mp ?? mm;
+      if (match && match[1] && match[2] && !controlKeywords.has(match[2])) {
+        const indentWidth = match[1].replace(/\t/g, "  ").length;
+        if (currentObjIndent === -1) {
+          currentObjIndent = indentWidth;
+        }
+        if (indentWidth === currentObjIndent) {
+          const { hasArrow, hasBrace } = hasArrowOrBraceWithin(lines, i, 10);
+          if (hasBrace || (mp && hasArrow)) {
+            const endLine = hasBrace ? findBraceBlockEnd(lines, i, "js") : findTsValueDeclEnd(lines, i);
+            symbols.push({
+              kind: "method",
+              name: match[2],
               startLine: i + 1,
               endLine,
               depth: 1,

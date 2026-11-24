@@ -1156,7 +1156,21 @@ async function runInstall(opts) {
     await assertRemovableTarget(resolvedDst, dstStat);
     const { preserved: preservedLocalRules, skipped: skippedLocalRules } =
       await snapshotLocalRuleFiles(resolvedDst);
-    await removeTargetPath(resolvedDst, dstStat);
+    try {
+      await removeTargetPath(resolvedDst, dstStat);
+    } catch (err) {
+      // On Windows, a running MCP server inside the plugin directory holds a handle that makes
+      // rmdir fail with EBUSY/EPERM/ENOTEMPTY even though overwriting files in-place succeeds.
+      const code = err?.code;
+      const canFallbackInPlace =
+        Boolean(dstStat) &&
+        !dstStat.isSymbolicLink() &&
+        dstStat.isDirectory() &&
+        (code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY");
+      if (!canFallbackInPlace) {
+        throw err;
+      }
+    }
     await copyRuntimeFiles(resolvedSrc, resolvedDst);
     await applyToolLoadingToCopiedPluginDir(resolvedDst, effectiveToolLoading);
     const { restored } = await restoreLocalRuleFiles(resolvedDst, preservedLocalRules);

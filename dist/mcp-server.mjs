@@ -4152,6 +4152,8 @@ function scanBracesOnLine(line, state, lang, ignoreBracesInParensBeforeOpen = fa
   let close = 0;
   let openParen = 0;
   let closeParen = 0;
+  let openBracket = 0;
+  let closeBracket = 0;
   let parenDepth = state.parenDepth ?? 0;
   let seenOpen = alreadySeenOpen;
   let inSingle = false;
@@ -4277,6 +4279,12 @@ function scanBracesOnLine(line, state, lang, ignoreBracesInParensBeforeOpen = fa
       closeParen++;
       parenDepth = Math.max(0, parenDepth - 1);
       lastCodeChar = ")";
+    } else if (ch === "[") {
+      openBracket++;
+      lastCodeChar = "[";
+    } else if (ch === "]") {
+      closeBracket++;
+      lastCodeChar = "]";
     } else if (!/\s/.test(ch)) {
       lastCodeChar = ch;
     }
@@ -4287,6 +4295,8 @@ function scanBracesOnLine(line, state, lang, ignoreBracesInParensBeforeOpen = fa
     close,
     openParen,
     closeParen,
+    openBracket,
+    closeBracket,
     endsWithSemi: lastCodeChar === ";",
     lastCodeChar
   };
@@ -4384,6 +4394,37 @@ function findParenCallEnd(lines, startIdx) {
   }
   return startIdx + 1;
 }
+function findTsValueDeclEnd(lines, startIdx) {
+  const firstLine = lines[startIdx] ?? "";
+  const eqIdx = firstLine.indexOf("=");
+  const state = {
+    inBlockComment: false,
+    templateExprStack: [],
+    inBacktick: false,
+    parenDepth: 0
+  };
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let seenOpen = false;
+  const maxScan = Math.min(lines.length, startIdx + 400);
+  for (let i = startIdx; i < maxScan; i++) {
+    const segment = i === startIdx && eqIdx >= 0 ? firstLine.slice(eqIdx + 1) : lines[i];
+    const { open, close, openParen, openBracket, closeBracket, endsWithSemi, lastCodeChar } = scanBracesOnLine(segment, state, "js");
+    if (open > 0 || openParen > 0 || openBracket > 0) {
+      seenOpen = true;
+    }
+    braceDepth += open - close;
+    bracketDepth += openBracket - closeBracket;
+    const parenDepth = state.parenDepth ?? 0;
+    if (seenOpen && braceDepth <= 0 && parenDepth <= 0 && bracketDepth <= 0 && !state.inBacktick && !state.inBlockComment) {
+      return i + 1;
+    }
+    if (!seenOpen && !state.inBacktick && !state.inBlockComment && (endsWithSemi || lastCodeChar !== "" && lastCodeChar !== "=")) {
+      return i + 1;
+    }
+  }
+  return seenOpen ? Math.min(lines.length, maxScan) : startIdx + 1;
+}
 function hasArrowOrBraceWithin(lines, startIdx, maxLookahead = 12) {
   const state = { inBlockComment: false, templateExprStack: [], inBacktick: false };
   let parenDepth = 0;
@@ -4440,7 +4481,11 @@ function extractTsJsSymbols(lines) {
     }
   ];
   const multilineArrowStartRe = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s+)?\(/;
+  const exportedValueDeclRe = /^export\s+(?:declare\s+)?(const|let|var)\s+([A-Za-z_$][\w$]*)\b/;
+  const structuredLocalValueDeclRe = /^(const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:(?:new\s+[\w.$]+|[\w.$]+)(?:\s*<[^>]*>)?\s*\(|\{|\[|$)/;
+  const objectLiteralInitRe = /=\s*(?:Object\.freeze\s*\(\s*)?\{/;
   const methodHeaderRe = /^([ \t]{1,4})(?:(?:public|private|protected|static|readonly|override|abstract|async|get|set)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/;
+  const objPropFnRe = /^([ \t]{1,4})([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|[A-Za-z_$][\w$]*\s*=>)/;
   const controlKeywords = /* @__PURE__ */ new Set([
     "if",
     "for",
@@ -4462,6 +4507,8 @@ function extractTsJsSymbols(lines) {
   const testCaseRe = /^[ \t]{0,4}(?:it|test)(?:\.(?:only|skip))?\s*\(\s*['"`]([^'"`]+)['"`]/;
   let currentClassEnd = -1;
   let currentClassIndent = -1;
+  let currentObjEnd = -1;
+  let currentObjIndent = -1;
   let currentFnEnd = -1;
   let currentSuiteEnd = -1;
   const commentState = {
@@ -4537,6 +4584,24 @@ function extractTsJsSymbols(lines) {
           matchedTop = true;
         }
       }
+      if (!matchedTop) {
+        const mv = exportedValueDeclRe.exec(line) ?? structuredLocalValueDeclRe.exec(line);
+        if (mv && mv[1] && mv[2]) {
+          const endLine = findTsValueDeclEnd(lines, i);
+          symbols.push({
+            kind: mv[1],
+            name: mv[2],
+            startLine: i + 1,
+            endLine,
+            depth: 0
+          });
+          if (endLine > i + 1 && objectLiteralInitRe.test(line)) {
+            currentObjEnd = endLine;
+            currentObjIndent = -1;
+          }
+          matchedTop = true;
+        }
+      }
     }
     if (!matchedTop && i + 1 <= currentClassEnd) {
       const mm = methodHeaderRe.exec(line);
@@ -4552,6 +4617,29 @@ function extractTsJsSymbols(lines) {
             symbols.push({
               kind: "method",
               name: mm[2],
+              startLine: i + 1,
+              endLine,
+              depth: 1
+            });
+          }
+        }
+      }
+    } else if (!matchedTop && i + 1 <= currentObjEnd) {
+      const mp = objPropFnRe.exec(line);
+      const mm = mp ? null : methodHeaderRe.exec(line);
+      const match = mp ?? mm;
+      if (match && match[1] && match[2] && !controlKeywords.has(match[2])) {
+        const indentWidth = match[1].replace(/\t/g, "  ").length;
+        if (currentObjIndent === -1) {
+          currentObjIndent = indentWidth;
+        }
+        if (indentWidth === currentObjIndent) {
+          const { hasArrow, hasBrace } = hasArrowOrBraceWithin(lines, i, 10);
+          if (hasBrace || mp && hasArrow) {
+            const endLine = hasBrace ? findBraceBlockEnd(lines, i, "js") : findTsValueDeclEnd(lines, i);
+            symbols.push({
+              kind: "method",
+              name: match[2],
               startLine: i + 1,
               endLine,
               depth: 1
@@ -7957,13 +8045,20 @@ function getCachedFileLineCount(absPath, cache) {
   cache.set(absPath, promise);
   return promise;
 }
+var LARGE_FILE_OUTLINE_THRESHOLD = 300;
+var lineCountLargeFiles = /* @__PURE__ */ new WeakMap();
 async function collectFileLineCounts(relFiles, baseCwd, cache) {
   const unique = [...new Set(relFiles)].slice(0, MAX_LINE_COUNT_FILES);
   const result = /* @__PURE__ */ new Map();
+  const largeFiles = lineCountLargeFiles.get(cache);
   await Promise.all(
     unique.map(async (relFile) => {
       const absPath = resolvePath(relFile, baseCwd);
-      result.set(relFile, await getCachedFileLineCount(absPath, cache));
+      const count = await getCachedFileLineCount(absPath, cache);
+      result.set(relFile, count);
+      if (largeFiles && typeof count === "number" && count > LARGE_FILE_OUTLINE_THRESHOLD) {
+        largeFiles.set(relFile, count);
+      }
     })
   );
   return result;
@@ -8120,7 +8215,7 @@ async function runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineC
     useRg
   );
   if (candidateRes.files.length === 0) {
-    return "(no definitions found)";
+    return "(no definitions found \u2014 try type:'refs' or 'text' if this is a property, destructured binding, or literal)";
   }
   const sortedCandidates = [...candidateRes.files].sort((a, b) => {
     const aTest = isTestLikePath(a.file) ? 1 : 0;
@@ -8172,7 +8267,7 @@ async function runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineC
     }
   }
   if (matchedFiles.length === 0) {
-    return "(no definitions found)";
+    return "(no definitions found \u2014 try type:'refs' or 'text' if this is a property, destructured binding, or literal)";
   }
   const lineCounts = await collectFileLineCounts(
     matchedFiles.map((f) => f.file),
@@ -8195,7 +8290,7 @@ async function runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineC
 ... [truncated; showing ${matchedFiles.length} files]` : "";
     return `${body}${footer2}`;
   }
-  const includeBody = Boolean(query.includeBody);
+  const includeBody = query.includeBody !== false;
   const MAX_DEF_INLINE_BODY_LINES = 40;
   const DEF_LARGE_PREVIEW_LINES = 3;
   const fileLinesMap = /* @__PURE__ */ new Map();
@@ -8390,7 +8485,32 @@ ${formatted.join("\n")}`;
   });
   return `${blocks.join("\n")}${footer}`;
 }
-async function executeSingleQuery(query, index, baseCwd, useRg, symbolCache, lineCountCache) {
+function looksLikeCodeSymbol(pattern) {
+  const p = pattern.trim();
+  if (p.length < 4 || p.length > 80) return false;
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(p)) return false;
+  if (/[a-z][A-Z]/.test(p)) return true;
+  if (/[0-9][A-Z]/.test(p)) return true;
+  if (/^[A-Z][a-z]+[A-Z]/.test(p)) return true;
+  if (/^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+$/.test(p)) return true;
+  return false;
+}
+async function runSymbolQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache) {
+  const [defOut, refsOut] = await Promise.all([
+    runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache),
+    runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache)
+  ]);
+  const noDef = defOut.startsWith("(no definitions found");
+  const noRefs = refsOut === "(no references found)";
+  if (noDef && noRefs) {
+    return "(no definitions or references found \u2014 try type:'text' if this is a string literal or partial match)";
+  }
+  return `### Definitions
+${defOut}
+### References
+${refsOut}`;
+}
+async function executeSingleQuery(query, index, baseCwd, useRg, symbolCache, lineCountCache, batchCtx) {
   const header = `## Query ${index + 1} [${query.type}] ${query.pattern}${query.path ? ` (in ${query.path})` : ""}`;
   try {
     if (!query.pattern || typeof query.pattern !== "string") {
@@ -8428,6 +8548,11 @@ ${out}`;
       return `${header}
 ${out}`;
     }
+    if (query.type === "symbol") {
+      const out = await runSymbolQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache);
+      return `${header}
+${out}`;
+    }
     if (query.type === "def") {
       const out = await runDefQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache);
       return `${header}
@@ -8435,8 +8560,12 @@ ${out}`;
     }
     if (query.type === "refs") {
       const out = await runRefsQuery(query, searchRoot, baseCwd, useRg, symbolCache, lineCountCache);
+      const trimmedPat = query.pattern.trim();
+      const shouldNudgePair = (query.outputMode ?? "content") === "content" && out !== "(no references found)" && !batchCtx.defPatterns.has(trimmedPat);
+      const tip = shouldNudgePair ? `
+[tip] Use type:'symbol' (or pair with type:'def') to get the definition body + refs together in 1 call.` : "";
       return `${header}
-${out}`;
+${out}${tip}`;
     }
     if (query.type === "text" || query.type === "regex") {
       const res = await runTextOrRegexInternal(query, searchRoot, baseCwd, useRg);
@@ -8459,8 +8588,12 @@ ${out}`;
         return `${header}
 ${body}${footer}`;
       }
+      const trimmedPat = query.pattern.trim();
+      const shouldNudgeSymbol = query.type === "text" && res.files.length > 0 && looksLikeCodeSymbol(trimmedPat) && !batchCtx.symbolOrRefsPatterns.has(trimmedPat);
+      const tip = shouldNudgeSymbol ? `
+[tip] '${trimmedPat}' looks like a symbol \u2014 use type:'symbol' (or 'def'+'refs') for exact Lstart-Lend, inline body, and caller tags.` : "";
       return `${header}
-${formatFileMatches(res.files, res.totalMatches, res.truncated, lineCounts)}`;
+${formatFileMatches(res.files, res.totalMatches, res.truncated, lineCounts)}${tip}`;
     }
     throw new Error(`Unsupported query type: ${String(query.type)}`);
   } catch (err) {
@@ -8540,14 +8673,36 @@ async function runBatchSearch(input, options = {}) {
   const maxChars = clampInt(input.maxChars ?? 8500, 500, DEFAULT_INLINE_MAX_BYTES);
   const maxBytes = DEFAULT_INLINE_MAX_BYTES;
   const needsTextSearch = queries.some(
-    (q) => q.type === "text" || q.type === "regex" || q.type === "def" || q.type === "refs"
+    (q) => q.type === "symbol" || q.type === "text" || q.type === "regex" || q.type === "def" || q.type === "refs"
   );
   const useRg = needsTextSearch && !options.forceNodeFallback && await isRipgrepAvailable();
   const symbolCache = /* @__PURE__ */ new Map();
   const lineCountCache = /* @__PURE__ */ new Map();
+  const largeFiles = /* @__PURE__ */ new Map();
+  lineCountLargeFiles.set(lineCountCache, largeFiles);
+  const batchCtx = {
+    defPatterns: new Set(
+      queries.filter((q) => (q.type === "def" || q.type === "symbol") && typeof q.pattern === "string").map((q) => q.pattern.trim())
+    ),
+    symbolOrRefsPatterns: new Set(
+      queries.filter(
+        (q) => (q.type === "symbol" || q.type === "def" || q.type === "refs") && typeof q.pattern === "string"
+      ).map((q) => q.pattern.trim())
+    )
+  };
   const sections = await Promise.all(
-    queries.map((q, idx) => executeSingleQuery(q, idx, baseCwd, useRg, symbolCache, lineCountCache))
+    queries.map(
+      (q, idx) => executeSingleQuery(q, idx, baseCwd, useRg, symbolCache, lineCountCache, batchCtx)
+    )
   );
+  if (largeFiles.size > 0 && sections.length > 0 && maxChars >= 1200) {
+    const sortedLarge = [...largeFiles.entries()].sort((a, b) => b[1] - a[1]);
+    const shown = sortedLarge.slice(0, 5).map(([f, lc]) => `${f} (${lc}L)`);
+    const more = sortedLarge.length > 5 ? ` (+${sortedLarge.length - 5} more)` : "";
+    const nudge = sortedLarge.length === 1 ? `[next] Large file (>${LARGE_FILE_OUTLINE_THRESHOLD}L): ${shown[0]} \u2014 call quick_outline first before ranged read_file.` : `[next] Large files (>${LARGE_FILE_OUTLINE_THRESHOLD}L): ${shown.join(", ")}${more} \u2014 call quick_outline in 1 batch before ranged read_file.`;
+    sections[sections.length - 1] = `${sections[sections.length - 1]}
+${nudge}`;
+  }
   return {
     text: fitSectionsToByteBudget(sections, maxChars, maxBytes, "\n\n"),
     isError: false
@@ -9100,7 +9255,7 @@ function clampInt2(val, min, max, fallback) {
 }
 
 // src/mcp-server.ts
-var SERVER_VERSION = "0.4.0";
+var SERVER_VERSION = "0.5.0";
 var DEFAULT_PLUGIN_ROOT = path7.resolve(
   path7.dirname(fileURLToPath2(import.meta.url)),
   ".."
@@ -9350,7 +9505,7 @@ function createAgyFastServer(options = {}) {
   server.registerTool(
     {
       name: "batch_search",
-      description: "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output and (NL) file line counts. Prefer type:'def' for symbol definitions (exact Lstart-Lend) and type:'refs' for callers/usages/imports over 'text'.",
+      description: "Run multiple read-only symbol/def/refs/text/regex searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output and (NL) file line counts. Always prefer type:'symbol' (definition with inline body + callers/usages/imports in 1 query) or type:'def'/'refs' over 'text' for code identifiers.",
       inputSchema: {
         type: "object",
         properties: {
@@ -9368,12 +9523,12 @@ function createAgyFastServer(options = {}) {
               properties: {
                 type: {
                   type: "string",
-                  enum: ["text", "regex", "glob", "fuzzy", "git", "def", "refs"],
-                  description: "Use 'def' for symbol definitions, 'refs' for callers/usages/imports, 'text'/'regex' for literals or unknown strings, 'glob'/'fuzzy' for paths, 'git' for read-only git."
+                  enum: ["symbol", "def", "refs", "text", "regex", "glob", "fuzzy", "git"],
+                  description: "Use 'symbol' to trace a code symbol (definition with inline body + callers/usages/imports in 1 query), 'def' for definitions only, 'refs' for callers/usages/imports, 'text'/'regex' for literals or unknown strings, 'glob'/'fuzzy' for paths, 'git' for read-only git."
                 },
                 pattern: {
                   type: "string",
-                  description: "Literal text, regex, symbol name (def/refs), fuzzy path query, glob pattern (use * and {a,b}, not regex |), or read-only git subcommand (e.g. 'status --short', 'log -n 5 --oneline')."
+                  description: "Symbol name (symbol/def/refs), literal text, regex, fuzzy path query, glob pattern (use * and {a,b}, not regex |), or read-only git subcommand (e.g. 'status --short', 'log -n 5 --oneline')."
                 },
                 path: {
                   type: "string",
@@ -9419,7 +9574,7 @@ function createAgyFastServer(options = {}) {
                 },
                 includeBody: {
                   type: "boolean",
-                  description: "For type:'def', inline numbered source body for definitions <=40 lines (larger defs show 3-line preview + read_file pointer)."
+                  description: "For type:'symbol' or 'def', inline numbered source body for definitions <=40 lines (default true; set false for headers only). Larger defs show 3-line preview + read_file pointer."
                 }
               },
               required: ["type", "pattern"]

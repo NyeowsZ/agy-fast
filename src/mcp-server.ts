@@ -19,7 +19,7 @@ import {
 } from "./tools/read-slices.js";
 import { runChecks, type RunChecksInput } from "./tools/run-checks.js";
 
-const SERVER_VERSION = "0.4.0";
+const SERVER_VERSION = "0.5.0";
 const DEFAULT_PLUGIN_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -326,7 +326,7 @@ export function createAgyFastServer(
     {
       name: "batch_search",
       description:
-        "Run multiple read-only text/regex/def/refs searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output and (NL) file line counts. Prefer type:'def' for symbol definitions (exact Lstart-Lend) and type:'refs' for callers/usages/imports over 'text'.",
+        "Run multiple read-only symbol/def/refs/text/regex searches, file globs, fuzzy path lookups, and read-only git queries (status/diff/log/show/branch) concurrently in one call with bounded output and (NL) file line counts. Always prefer type:'symbol' (definition with inline body + callers/usages/imports in 1 query) or type:'def'/'refs' over 'text' for code identifiers.",
       inputSchema: {
         type: "object",
         properties: {
@@ -344,14 +344,14 @@ export function createAgyFastServer(
               properties: {
                 type: {
                   type: "string",
-                  enum: ["text", "regex", "glob", "fuzzy", "git", "def", "refs"],
+                  enum: ["symbol", "def", "refs", "text", "regex", "glob", "fuzzy", "git"],
                   description:
-                    "Use 'def' for symbol definitions, 'refs' for callers/usages/imports, 'text'/'regex' for literals or unknown strings, 'glob'/'fuzzy' for paths, 'git' for read-only git.",
+                    "Use 'symbol' to trace a code symbol (definition with inline body + callers/usages/imports in 1 query), 'def' for definitions only, 'refs' for callers/usages/imports, 'text'/'regex' for literals or unknown strings, 'glob'/'fuzzy' for paths, 'git' for read-only git.",
                 },
                 pattern: {
                   type: "string",
                   description:
-                    "Literal text, regex, symbol name (def/refs), fuzzy path query, glob pattern (use * and {a,b}, not regex |), or read-only git subcommand (e.g. 'status --short', 'log -n 5 --oneline').",
+                    "Symbol name (symbol/def/refs), literal text, regex, fuzzy path query, glob pattern (use * and {a,b}, not regex |), or read-only git subcommand (e.g. 'status --short', 'log -n 5 --oneline').",
                 },
                 path: {
                   type: "string",
@@ -397,7 +397,7 @@ export function createAgyFastServer(
                 },
                 includeBody: {
                   type: "boolean",
-                  description: "For type:'def', inline numbered source body for definitions <=40 lines (larger defs show 3-line preview + read_file pointer).",
+                  description: "For type:'symbol' or 'def', inline numbered source body for definitions <=40 lines (default true; set false for headers only). Larger defs show 3-line preview + read_file pointer.",
                 },
               },
               required: ["type", "pattern"],

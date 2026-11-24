@@ -1230,4 +1230,104 @@ describe("batch_search", () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("supports type:'symbol', defaults includeBody:true on def (with opt-out), finds const/object-method defs, and emits routing nudges", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-fast-symbol-nudges-"));
+    try {
+      await fs.mkdir(path.join(dir, "backend", "db"), { recursive: true });
+      await fs.mkdir(path.join(dir, "apps", "mobile"), { recursive: true });
+
+      await fs.writeFile(
+        path.join(dir, "backend", "db", "schema.ts"),
+        [
+          "export const fcmTokens = pgTable('fcm_tokens', {",
+          "  id: serial('id').primaryKey(),",
+          "  token: text('token').notNull(),",
+          "});",
+          "",
+          "export const fcmService = {",
+          "  async setupFcm(userId: string) {",
+          "    return fcmTokens;",
+          "  },",
+          "};",
+        ].join("\n") + "\n",
+        "utf8",
+      );
+
+      // Large file (>300L) referencing fcmTokens and fcmService.setupFcm
+      const filler = Array.from({ length: 315 }, (_, i) => `const pad${i} = ${i};`);
+      await fs.writeFile(
+        path.join(dir, "apps", "mobile", "V1Context.tsx"),
+        [
+          "import { fcmTokens, fcmService } from '../../backend/db/schema';",
+          "export function initPush(uid: string) {",
+          "  void fcmTokens;",
+          "  return fcmService.setupFcm(uid);",
+          "}",
+          "const greeting = 'hello world';",
+          ...filler,
+        ].join("\n") + "\n",
+        "utf8",
+      );
+
+      for (const forceNodeFallback of [false, true]) {
+        // 1. type:'symbol' combines def (with default inline body) + caller-tagged refs for const & object method
+        const symRes = await runBatchSearch(
+          {
+            cwd: dir,
+            queries: [
+              { type: "symbol", pattern: "fcmTokens" },
+              { type: "symbol", pattern: "fcmService.setupFcm" },
+              { type: "def", pattern: "fcmTokens", includeBody: false },
+            ],
+          },
+          { forceNodeFallback },
+        );
+        assert.equal(symRes.isError, false, symRes.text);
+        const symSections = symRes.text.split("\n\n");
+
+        // Query 1: symbol fcmTokens includes Definitions with inline body + References with caller tag
+        assert.match(symSections[0]!, /### Definitions/);
+        assert.match(symSections[0]!, /L1-L4 \[const\] fcmTokens/);
+        assert.match(symSections[0]!, /2:   id: serial\('id'\)\.primaryKey\(\),/);
+        assert.match(symSections[0]!, /### References/);
+        assert.match(symSections[0]!, /void fcmTokens;  \[in initPush L2-L5\]/);
+
+        // Query 2: symbol fcmService.setupFcm resolves object-literal method + caller
+        assert.match(symSections[1]!, /L7-L9 \[method\] fcmService\.setupFcm/);
+        assert.match(symSections[1]!, /8:     return fcmTokens;/);
+        assert.match(symSections[1]!, /return fcmService\.setupFcm\(uid\);  \[in initPush L2-L5\]/);
+
+        // Query 3: explicit includeBody:false suppresses inline body lines
+        assert.match(symSections[2]!, /L1-L4 \[const\] fcmTokens/);
+        assert.doesNotMatch(symSections[2]!, /primaryKey/);
+
+        // Large-file (>300L) quick_outline nudge appears once at end
+        assert.match(
+          symRes.text,
+          /\[next\] Large file \(>300L\): apps\/mobile\/V1Context\.tsx \(321L\) — call quick_outline first before ranged read_file\./,
+        );
+
+        // 2. Contextual nudges: identifier in text, unpaired refs, no spam on plain word 'hello'
+        const nudgeRes = await runBatchSearch(
+          {
+            cwd: dir,
+            queries: [
+              { type: "text", pattern: "fcmTokens" },
+              { type: "text", pattern: "hello" },
+              { type: "refs", pattern: "setupFcm" },
+            ],
+          },
+          { forceNodeFallback },
+        );
+        assert.equal(nudgeRes.isError, false, nudgeRes.text);
+        const nudgeSections = nudgeRes.text.split("\n\n");
+        assert.match(nudgeSections[0]!, /\[tip\] 'fcmTokens' looks like a symbol — use type:'symbol'/);
+        assert.doesNotMatch(nudgeSections[1]!, /\[tip\]/);
+        assert.match(nudgeSections[2]!, /\[tip\] Use type:'symbol' \(or pair with type:'def'\)/);
+      }
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });

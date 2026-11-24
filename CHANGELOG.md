@@ -7,20 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+---
+
+## [0.5.0] - 2026-11-23
+
 ### Added
 
+- **Unified `type: "symbol"` query in `batch_search`**
+  - Combines `def` (with inline `<=40L` body / 3-line preview + `read_file` pointer) and caller-tagged `refs` in a single query over the shared symbol cache, eliminating forgotten `def`+`refs` pairings.
+- **Just-in-time routing nudges in `batch_search` & `SessionStart`**
+  - `batch_search` emits a compact `[next]` nudge when any matched file is `>300L` (prompting `quick_outline` before ranged `read_file`), a `[tip]` when `type: "text"` is used on a code identifier, and a `[tip]` when `type: "refs"` is run without `def`/`symbol`.
+  - `SessionStart` appends a 1-line routing cue to the startup snapshot right next to the user's first prompt.
+- **TS/JS `const`/`let`/`var` & object-literal method extraction**
+  - Extracts top-level `export const/let/var` declarations (e.g., Drizzle tables, schemas, contexts, arrays, constants), structured local initializers, and nested methods/arrow properties inside object-literal services with bracket-aware line spans.
 - **File line-count annotations `(NL)` & `*.tsbuildinfo` noise filtering in `batch_search`**
-  - Annotated matched file headers with total line counts (e.g. `src/fcm.ts (234L)`) across `text`, `regex`, `def`, `refs`, `fuzzy`, and `glob` queries using a fast per-batch cached newline byte scan (`<= 512 KB`, `<= 40` files), eliminating blind `1-160` read guesses and 2-part truncation retries on `<=300L` files.
+  - Annotated matched file headers with total line counts (e.g. `src/fcm.ts (234L)`) across `symbol`, `text`, `regex`, `def`, `refs`, `fuzzy`, and `glob` queries using a fast per-batch cached newline byte scan (`<= 512 KB`, `<= 40` files), eliminating blind `1-160` read guesses and 2-part truncation retries on `<=300L` files.
   - Excluded `*.tsbuildinfo` incremental compiler cache files by default in both ripgrep and Node fallback paths (still searchable when explicitly targeted via `path`, `glob`, or `fuzzy`/`glob` pattern).
 
 ### Changed
 
-- **Aligned `quick_outline` / `batch_search` tool descriptions & tightened `rules/AGENTS.md` against serial-read lock-in**
-  - Updated `quick_outline`'s MCP description from `"for unknown large files"` to `"for >=2 unfamiliar files or any >300-line file"` so the tool schema reinforces rather than contradicts `rules/AGENTS.md`, and surfaced `(NL)` file line counts in `batch_search`'s description.
-  - Simplified `rules/AGENTS.md` line thresholds to a crisp `<=300L` vs `>300L` rule backed by `batch_search`'s `(NL)` lengths and added an explicit anti-serial gate (`Never emit 1 read_file when >=2 target files or ranges are already known`).
-- **Overhauled routing rules (`rules/AGENTS.md`) for leaner token footprint & clearer tool selection**
-  - Fixed two routing catch-22s: replaced unactionable `>300` vs `<300` line-count branching and the `<300` vs `<=200`-line `read_file` conflict with observable triggers (`>=2` unknown files → `quick_outline` + parallel ranged `read_file`; 1 suspected-small file → `read_file(1-300)` instead of 2-turn `1-150` + `151-234` chunking), and switched `batch_search(type: "def")` to always pass `includeBody: true` paired with `type: "refs"` in the same call.
-  - Restructured dense multi-topic rules into workflow phases (`Locate` → `Read` → `Edit & Verify` → `Host & Session Hygiene`), clarified single-op boundaries (`edit_file` for 1 small hunk without `verify`), and removed duplicate inline `Quick Schemas` now that all 5 tools load eagerly via `mcp_config.json` (~36% smaller always-on prompt footprint: 5.66 KB → 3.60 KB).
+- **`includeBody` now defaults to `true` on `batch_search` `def`/`symbol` queries** (opt-out with `includeBody: false`).
+- **Aligned `quick_outline` / `batch_search` tool descriptions & tightened `rules/AGENTS.md`**
+  - Updated `batch_search` schema to put `type: "symbol"` first and updated `quick_outline`'s MCP description to `"for >=2 unfamiliar files or any >300-line file"`.
+  - Trimmed `rules/AGENTS.md` to a concise playbook centered on `type: "symbol"`, `quick_outline` for `>300L`, and parallel `read_file`.
 
 ---
 

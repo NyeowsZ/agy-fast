@@ -1212,4 +1212,52 @@ describe("read_slices", () => {
     assert.equal(corrupted.isError, true);
     assert.match(corrupted.text, /Validation failed/);
   });
+
+  it("extracts TS/JS exported const values, Drizzle-style tables, object-literal services, and nested methods", () => {
+    const src = [
+      "const INTERNAL_LIMIT = 5;",
+      "",
+      "export const fcmTokens = pgTable('fcm_tokens', {",
+      "  id: serial('id').primaryKey(),",
+      "  token: text('token').notNull(),",
+      "});",
+      "",
+      "export const fcmService = {",
+      "  async setupFcm(userId: string) {",
+      "    return userId;",
+      "  },",
+      "  uploadFcmToken: async (token: string) => {",
+      "    return Boolean(token);",
+      "  },",
+      "};",
+      "",
+      "export const ROUTES = [",
+      "  '/api/v1/fcm',",
+      "  '/api/v1/orders',",
+      "];",
+      "",
+      "export const API_URL = 'https://example.com';",
+      "",
+      "const localStore = {",
+      "  ping() {",
+      "    return true;",
+      "  },",
+      "};",
+    ].join("\n");
+
+    const syms = extractSymbols("schema.ts", src);
+    assert.deepEqual(
+      syms.map((s) => `${s.depth}:${s.kind}:${s.name}:${s.startLine}-${s.endLine}`),
+      [
+        "0:const:fcmTokens:3-6",
+        "0:const:fcmService:8-15",
+        "1:method:setupFcm:9-11",
+        "1:method:uploadFcmToken:12-14",
+        "0:const:ROUTES:17-20",
+        "0:const:API_URL:22-22",
+        "0:const:localStore:24-28",
+        "1:method:ping:25-27",
+      ],
+    );
+  });
 });

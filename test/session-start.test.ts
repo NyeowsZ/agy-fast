@@ -116,6 +116,7 @@ describe("session-start hook", () => {
     assert.match(msg, /dirty\.ts/);
     assert.match(msg, /package\.json \(demo-app\) scripts: build, test, lint/);
     assert.match(msg, /Makefile targets: build, test/);
+    assert.match(msg, /Routing: use batch_search type:'symbol'.*quick_outline for >300L files/);
     assert.doesNotMatch(msg, /node_modules/);
   });
 

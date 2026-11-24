@@ -1698,7 +1698,8 @@ async function main() {
       compatNotice = formatSessionStartCompatNotice(hostCompat);
     } catch {
     }
-    const trailingNotices = [compatNotice, updateNotice].filter(
+    const routingCue = "Routing: use batch_search type:'symbol' (or def+refs) for code symbols; quick_outline for >300L files; batch <=300L reads in parallel read_file.";
+    const trailingNotices = [routingCue, compatNotice, updateNotice].filter(
       (n) => Boolean(n)
     );
     let messageText = snapshot;
